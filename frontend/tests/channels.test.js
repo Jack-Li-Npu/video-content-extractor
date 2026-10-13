@@ -35,6 +35,7 @@ test('background channel status distinguishes manual action, extraction, failure
   assert.equal(channelStatus({}), '');
   assert.equal(channelStatus({ loading: true }), 'Extracting');
   assert.equal(channelStatus({ job: { state: 'waiting_verification' }, loading: true }), 'Needs verification');
+  assert.equal(channelStatus({ job: { state: 'waiting_track' }, loading: true }), 'Choose captions');
   assert.equal(channelStatus({ job: { state: 'transcribing' } }), 'Extracting');
   assert.equal(channelStatus({ job: { state: 'failed' } }), 'Needs attention');
   assert.equal(channelStatus({ error: 'Blocked' }), 'Needs attention');

@@ -2,7 +2,7 @@
 
 **Find the moments worth watching.**
 
-Extract YouTube captions or use the local Douyin workflow, bring a timestamped transcript to Codex, and find the moments worth watching. Douyin speech extraction has been verified on four public videos; platform verification can still block other videos.
+Retrieve existing YouTube or Douyin captions, bring a timestamped transcript to Codex, and find the moments worth watching. Both channels default to captions only. Douyin uses a dedicated browser for any manual verification; downloading a video for local speech recognition is a separate opt-in fallback.
 
 [Quick start](#quick-start) &nbsp; / &nbsp; [Douyin guide](docs/DOUYIN.md) &nbsp; / &nbsp; [See the demo](#demo-from-captions-to-a-timestamped-brief) &nbsp; / &nbsp; [Roadmap](ROADMAP.md) &nbsp; / &nbsp; [Attribution](#attribution)
 
@@ -14,9 +14,9 @@ Built on [samueladegoke/yt-transcript-web](https://github.com/samueladegoke/yt-t
 
 A long interview, lecture, or news program becomes easier to navigate when you can read a brief and open the passages that matter.
 
-1. **Choose a channel.** Open **YouTube** for existing captions, or **Douyin** for browser access followed by captions or optional local speech recognition. Paste a link from that platform.
+1. **Choose a channel.** Open **YouTube** or **Douyin**, paste a link, and retrieve an exposed caption track. Douyin may first require manual verification in its dedicated browser.
 2. **Bring it to Codex.** Copy or download one complete Markdown transcript with every retrieved caption and its timestamps.
-3. **Choose what to watch.** Use the included `video-brief` skill for an overview, key points, and links back to supporting passages.
+3. **Choose what to watch.** Use the included `video-brief` skill for an overview, key points, and selected claims worth checking, with links back to supporting passages.
 
 You choose when and where to submit the transcript. The app makes no AI-service requests or automatic uploads; the Markdown also works with other assistants.
 
@@ -25,13 +25,13 @@ You choose when and where to submit the transcript. The app makes no AI-service 
 | Channel | What happens after you paste a link |
 | --- | --- |
 | **YouTube** | Check existing caption tracks, choose the language when needed, and retrieve the transcript. No separate browser window or speech model is used. |
-| **Douyin** | Open the official video in a dedicated local browser. Complete any requested login or verification there, then click **I’ve verified, continue**. A working saved session proceeds automatically. |
+| **Douyin** | Open the official page in a dedicated local browser. Complete any requested login or verification, then click **I’ve verified, continue**. The app checks timed captions while blocking player media. Choose a track when several are exposed. A working saved session proceeds automatically. |
 
 Each channel keeps its own link, transcript, selected language, search, and errors while the page stays open. Switching to YouTube leaves an active Douyin job running. The Douyin tab shows **Needs verification**, **Extracting**, or **Ready**, so you can see when to return. Pasting a link into the wrong channel shows a message before any extraction request is sent.
 
 ![The separate Douyin channel with verification guidance, optional local speech, a restored 237-segment result and the complete Codex handoff](docs/screenshots/douyin-channel.jpg)
 
-This is the real result from the [7-minute math video](https://www.douyin.com/video/7631965839184432424) tested on 2026-10-11, restored into the refined interface. Search filters the view; exports still include all **237 segments**. Wording and timing are estimated speech recognition. Source imagery and captions belong to their creators.
+This historical screenshot restores the result from the [7-minute math video](https://www.douyin.com/video/7631965839184432424) tested on 2026-10-11. Search filters the view; exports still include all **237 segments**. This result used video download and local speech recognition, with estimated wording and timing; it does not demonstrate direct caption retrieval. The current interface starts with the download fallback off. Source imagery and captions belong to their creators.
 
 The page opens on YouTube. After a reload, open **Douyin** to restore its current job while the server is running. YouTube drafts and results stay in page memory and do not survive a reload. The **+** beside a channel heading starts a new transcript in that channel. Starting another Douyin extraction replaces its previous temporary video; switching channels does not. The interface follows your system's light or dark appearance and respects reduced motion.
 
@@ -56,18 +56,18 @@ Both screenshots show *Anthropic Goes Big on Compute, Microsoft Rethinks AI* by 
 
 ### Douyin: from manual verification to a complete handoff
 
-The latest version also handles individual Douyin links through a dedicated local browser. Complete any login or identity check yourself on the official Douyin page, then click **I’ve verified, continue** in the extractor. That same primary button starts the remaining steps: retrieve an available caption track, or acquire the video for optional local speech recognition, then prepare the Codex file. A working saved session can proceed without another check. **Douzy is not required.**
+Individual Douyin links use a dedicated local browser. Complete any login or identity check yourself on the official Douyin page, then click **I’ve verified, continue** in the extractor. The app checks the matching video's metadata and retrieves only exposed timed text; several tracks prompt a choice. If none is exposed, the default flow reports that limitation without downloading media. You can explicitly enable **Allow video download for local speech recognition** and retry. A working saved session can proceed without another check. **Douzy is not required.**
 
 ![Successful Douyin extraction showing the complete Codex handoff, local speech warning, timestamp links, and estimated input token count](docs/screenshots/douyin-codex-handoff.png)
 
-This screenshot is from the successful **2026-10-08** test of a **31-minute** video by **毕英杰Johnathan**: **466 speech-caption segments** and approximately **19,301 input tokens**, including metadata, timestamps, and the prompt. It demonstrates extraction and handoff, not independently verified subtitles or a completed illustrated AI brief. The full transcript and downloaded video are not distributed with this repository. [Source video](https://www.douyin.com/video/7685972770793999667) · [Setup, privacy, troubleshooting, and validation](docs/DOUYIN.md).
+This historical screenshot is from the successful **2026-10-08** speech test of a **31-minute** video by **毕英杰Johnathan**: **466 speech-caption segments** and approximately **19,301 input tokens**, including metadata, timestamps, and the prompt. It demonstrates the video-download fallback and handoff, not directly retrieved subtitles or a completed illustrated AI brief. The full transcript and downloaded video are not distributed with this repository. [Source video](https://www.douyin.com/video/7685972770793999667) · [Setup, privacy, troubleshooting, and validation](docs/DOUYIN.md).
 
 ## What works today
 
 | What you need | What the app provides |
 | --- | --- |
 | YouTube source text | Uploaded or automatic captions, explicit track selection, and full-text search |
-| Douyin source text | Existing captions when exposed, or optional local speech recognition after normal browser access |
+| Douyin source text | Existing timed JSON/SRT/VTT captions after normal browser access; explicit opt-in video download and local speech when no track is exposed |
 | A complete AI handoff | One Markdown document with all retrieved captions, source metadata, and millisecond timings |
 | Source context | Caption provenance and timing; speech-generated text is clearly labelled as estimated |
 | Control over analysis | Copy/download for your own assistant, with an optional `video-brief` skill |
@@ -76,13 +76,14 @@ Copy and download always include the entire retrieved transcript, even when sear
 
 ### Where this is going
 
-YouTube retrieves existing caption tracks when platform access permits. Douyin uses normal browser access and optional local speech recognition; after a requested manual check, one primary-button click runs acquisition through Codex handoff. See [Douyin setup and verification](docs/DOUYIN.md) for its tested boundaries.
+Both channels first retrieve existing caption tracks when platform access permits. Douyin keeps its browser verification and job progress, with a restricted metadata refresh and caption requests in that same browser. Caption-only results retain source timings but do not create a local player or guarantee exact seeking on Douyin's public page. See [Douyin setup and verification](docs/DOUYIN.md) for the optional speech fallback and tested boundaries.
 
 The [2026-10-11 system check](VERIFICATION.md#system-check--2026-10-11) added two successful Douyin videos with matching copy/download exports and verified local seeks. All four YouTube test links received a bot-check response through the tested proxy; those runs did not retrieve captions. Offline tests and historical successes do not guarantee current live access.
 
 | Direction | Status |
 | --- | --- |
-| Douyin browser acquisition + optional local speech | Verified on four public videos; other videos and real verification challenges can still fail |
+| Douyin direct timed captions | Implemented for exposed tracks; availability and browser access vary. See [current verification](VERIFICATION.md). |
+| Douyin opt-in video download + local speech | Historical success on four public videos; these were speech tests, not evidence of direct-caption availability |
 | TikTok and Bilibili caption adapters | Planned |
 | Browser extension beside the video player | Planned |
 | Click a key point to seek the active player | Planned |
@@ -102,7 +103,16 @@ cd video-content-extractor
 
 Open **http://127.0.0.1:8000**. Keep the terminal open while using the app; press Control-C to stop it. On subsequent macOS runs, you can double-click `start.command` in Finder.
 
-### Enable Douyin speech recognition once
+### Use Douyin captions without a speech model
+
+1. Open **Douyin** and paste an individual video, `jingxuan?modal_id=…`, or `v.douyin.com` share link. Keep **Allow video download for local speech recognition** off.
+2. Click **Extract transcript**. Complete any requested login, CAPTCHA, or identity check yourself in the dedicated official-page browser, then click **I’ve verified, continue** when the extractor asks.
+3. Choose a caption track if several are available, then click **Use selected captions**. The app reads the selected timed text into memory while blocking player video/audio requests.
+4. Copy or download the complete handoff. If no usable track is exposed, the app reports it; the title/description and text burned into the picture cannot substitute for timed subtitles.
+
+This mode does not download audio/video or speech models. It preserves caption timestamps, but public Douyin links do not provide reliable exact seeking. Local playback is available only when the optional fallback below acquired media.
+
+### Enable the optional Douyin speech fallback once
 
 Existing YouTube captions need no speech model. To generate speech captions for Douyin videos without an exposed caption track, use an **Apple Silicon Mac**, install FFmpeg, and run the optional setup from the project folder:
 
@@ -113,12 +123,12 @@ brew install ffmpeg
 
 The script uses uv to create a separate Python 3.12 environment and downloads about **1.6 GB of pinned model weights**, with additional space needed for dependencies. Inference then runs locally. If the server is already running, stop it with Control-C and launch `./start.command` again. Intel Macs, Windows, and Linux do not currently have a supported local speech backend.
 
-To use Douyin:
+To opt in to speech recognition:
 
-1. Open the **Douyin** tab. Paste an individual video, `jingxuan?modal_id=…`, or `v.douyin.com` share link. Leave **Use local speech recognition** checked when needed.
+1. Open the **Douyin** tab and enable **Allow video download for local speech recognition** before starting or retrying extraction.
 2. Click **Extract transcript**. Keep the dedicated browser open. If asked, complete Douyin's login, CAPTCHA, or identity verification yourself there; the extractor does not collect identity documents or solve challenges.
 3. Return to the extractor and click **I’ve verified, continue** when it asks. The remaining steps run automatically. If a saved session already works, this confirmation is skipped.
-4. When **Ready for Codex** appears, search the text, click a timestamp to inspect the local video, or copy/download the complete handoff. Check speech-recognition warnings before relying on names or numbers.
+4. If no caption track is exposed, the app downloads a temporary video with audio and runs local speech recognition. When **Ready for Codex** appears, search the text, inspect the local video at a timestamp, or copy/download the complete handoff. Check speech-recognition warnings before relying on names or numbers. If existing captions were retrieved instead, no local video is created.
 
 Keep the server running while Codex uses local video links. Starting another Douyin extraction or stopping the server removes the previous local video; downloaded transcript files remain on your computer. For retry behavior, configuration paths, and access failures, see the [Douyin guide](docs/DOUYIN.md).
 
@@ -175,6 +185,8 @@ For manual installation, copy `skills/video-brief/` into `~/.agents/skills/video
 
 The brief combines captions with screenshots when they refer to charts, diagrams, or demonstrations. Visual-dependent takeaways include readable visual details and a link to a verified clear view, with a separate narration link when useful. Screenshot inspection requires available browser/screenshot tools and access to the source video; a skill provides workflow instructions, not those tools. When visual inspection is unavailable, the prompt asks for a caption-based brief that identifies the unverified visuals.
 
+The brief also selects claims worth checking to help you judge the video quickly. Each entry identifies the speaker's claim, its grounds and limits, the strongest plausible alternative when useful, what to inspect, and the precise supporting source timestamp. Alternatives are labelled as hypotheses unless stated in the video or independently verified. The assistant avoids forced opposing opinions and unsupported factual verdicts; outside research is not required by default.
+
 You can add a preferred language or viewing-time budget. For another assistant, provide the skill's `SKILL.md` as workflow instructions alongside the source.
 
 The skill instructs the assistant to read every segment, verify supporting passages, attribute claims to speakers, and distinguish complete retrieved captions from complete audiovisual coverage. It cannot guarantee the accuracy of captions, visual interpretation, or an AI-generated summary.
@@ -183,7 +195,7 @@ The skill instructs the assistant to read every segment, verify supporting passa
 
 Each retrieved transcript shows an **estimated Codex input token count** beside the copy/download controls, with separate counts for the transcript (including metadata and timestamp formatting) and the setup prompt. Counting runs locally in a browser worker using `js-tiktoken` with the `o200k_base` reference encoding. It makes no AI-service request and uses the same complete text as copy and download, regardless of the search filter. Your selected model may tokenize it differently; this is not a bill, context-limit check, or prediction of total task usage.
 
-Extraction makes no AI-service requests. Optional Douyin speech recognition uses local compute, not a cloud token allowance. Once you submit the handoff, Codex's existing context, skill instructions, reasoning, tool results, screenshots, and generated answer can add usage across multiple steps. Model and plan also matter; see [official Codex usage guidance](https://learn.chatgpt.com/docs/pricing). The app cannot infer your remaining allowance or turn this text estimate into a reliable price.
+Extraction makes no AI-service requests. Optional Douyin speech recognition uses local compute, not a cloud token allowance. Once you submit the handoff, Codex's existing context, skill instructions, reasoning, tool results, screenshots, and generated brief—including claim checks—can add usage across multiple steps. Generated output is outside the displayed input estimate. Model and plan also matter; see [official Codex usage guidance](https://learn.chatgpt.com/docs/pricing). The app cannot infer your remaining allowance or turn this text estimate into a reliable price.
 
 For a lighter first pass, add **“Give me a caption-only brief; skip screenshots.”** This still reads all captions but skips visual inspection. Attaching the downloaded file instead of pasting includes the same text and does not reduce its token count. For a very long transcript, check the selected model's context limit before submitting it.
 
@@ -219,11 +231,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the proposed common platfor
 
 ## Limitations and data handling
 
-The YouTube path retrieves existing captions only and does not download media or transcribe speech. The optional Douyin path can temporarily download the requested video for local speech recognition; its separate setup downloads a pinned 1.6 GB model. Neither path translates captions, uploads media, or requires an AI API key.
+The YouTube path retrieves existing captions only and does not download media or transcribe speech. Douyin also defaults to captions only, blocking player media during metadata/caption probing and keeping retrieved text in memory. Explicitly enabling its local speech fallback permits a temporary video download when no timed track is exposed; separate speech setup downloads a pinned 1.6 GB model. Neither path translates captions, uploads media, or requires an AI API key.
 
 YouTube supports accessible public videos with existing captions. Douyin is limited to individual videos whose normal browser playback exposes usable metadata; manual login or verification may still not resolve platform restrictions. Private, removed, restricted, sign-in-required, or captionless videos may fail. Errors distinguish invalid links, unavailable videos, missing or empty captions, blocked requests, and connection failures. YouTube can change caption access; the app does not bypass authentication or access restrictions.
 
-The server binds to `127.0.0.1` and checks local hosts/origins. It is intended for personal local use, not public hosting. Metadata and signed caption URLs are cached in process memory for up to five minutes, with a maximum of eight videos. Transcript results stay in browser memory until copied, downloaded, replaced, or the page is closed. Thumbnails are loaded from YouTube. No transcript library or automatic upload is maintained. Douyin keeps the current job and temporary media locally until replaced or normal server shutdown; Speech failures keep the current acquired video for retry; cancelled jobs and failures without validated audio are cleared. Page reload restores the current job while the server stays running. Its dedicated login profile persists outside the repository. A forced crash can leave temporary files; see the Douyin guide for cleanup.
+The server binds to `127.0.0.1` and checks local hosts/origins. It is intended for personal local use, not public hosting. YouTube metadata and signed caption URLs are cached in process memory for up to five minutes, with a maximum of eight videos. YouTube transcript results stay in browser memory until copied, downloaded, replaced, or the page is closed. Thumbnails are loaded from YouTube. No transcript library or automatic upload is maintained. Douyin keeps the current job and caption result in server memory until replaced or normal shutdown. Optional speech keeps acquired media locally for playback and retry; cancelled jobs and failures without validated audio are cleared. Page reload restores the current Douyin job while the server stays running. Its dedicated login profile persists outside the repository. A forced crash can leave temporary files; see the Douyin guide for cleanup.
 
 Captions may contain mistakes, omit visuals, or leave gaps. Follow timestamp links to check the original context before relying on an important claim. Users remain responsible for how they use and share source material.
 
@@ -255,7 +267,8 @@ Contributions are welcome, particularly caption-provider adapters, player seekin
 - **Application foundation:** [samueladegoke/yt-transcript-web](https://github.com/samueladegoke/yt-transcript-web), by Samuel Adegoke / Sam Ade, adapted from commit [`4928098`](https://github.com/samueladegoke/yt-transcript-web/commit/4928098ffe109df932a8f4bae47f31ebcf314a10) under the [MIT license](LICENSE). This adaptation retains its React/FastAPI foundation and caption extraction library, and changes retrieval behavior, timing, export, layout, and the AI handoff workflow. The original upstream AI/MCP services and deployment configuration are not part of this version.
 - **Caption retrieval:** [jdepoix/youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api).
 - **Metadata and caption fallback:** [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp), used with media downloads disabled.
-- **Douyin browser workflow:** [Playwright](https://github.com/microsoft/playwright-python), independently implemented using normal browser playback. The public [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) documentation informed the approach; neither its downloader nor Douzy is bundled or required.
+- **Douyin browser workflow:** [Playwright](https://github.com/microsoft/playwright-python), independently implemented with an official-page browser, restricted metadata refresh, and caption-only requests. Public [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) documentation and local architectural study of Douzy informed the persistent-browser, narrow-operation and worker-state design. Douzy is not a dependency; no proprietary Douzy source or assets are included.
+- **Douyin caption formats:** The public [yt-dlp TikTok/Douyin extractor](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/tiktok.py) documents the explicit caption fields and millisecond `utterances` format used as references for our independent discovery/parser. Supported schemas do not imply every Douyin video exposes a track. See [acquisition boundaries](docs/DOUYIN.md#acquisition-boundaries).
 - **Optional local speech:** [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), [MLX](https://github.com/ml-explore/mlx), the [Whisper large-v3-turbo model conversion](https://huggingface.co/mlx-community/whisper-large-v3-turbo), and separately installed [FFmpeg](https://ffmpeg.org/).
 - **Frontend design guidance:** [Leonxlnx/taste-skill](https://github.com/Leonxlnx/taste-skill), especially its existing-project redesign workflow.
 - **Implementation stack:** React, Vite, Tailwind CSS, FastAPI, Uvicorn, Lucide icons, and self-hosted Geist fonts. Source links and license notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

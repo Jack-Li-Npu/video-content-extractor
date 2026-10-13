@@ -1,13 +1,11 @@
-"""Observe one Douyin video's normal browser playback after manual verification.
+"""Retrieve one Douyin video's captions after manual browser verification.
 
 No signature generation, challenge solving, private desktop code, or cookie export.
 The browser owns login. Only a matching video's metadata is retained by the job.
 """
 
-import html
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -22,6 +20,8 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 import requests
 from playwright.sync_api import Error as BrowserError
 
+from .douyin_browser import install_caption_media_guard, read_caption_text, refresh_video_metadata
+from .douyin_captions import caption_records, discover_caption_tracks
 from .speech_service import check_setup, probe_video, transcribe_job
 from .transcript_service import ExtractionError
 
@@ -50,9 +50,9 @@ def normalize_url(value):
     if parsed.username or parsed.password or port not in (None, 443):
         raise ExtractionError("invalid_url", "This Douyin link has an invalid address.", 400)
     query = parse_qs(parsed.query)
-    match = re.fullmatch(r"/video/(\d{16,22})/?", parsed.path)
+    match = re.fullmatch(r"/video/([0-9]{16,22})/?", parsed.path)
     identity = match.group(1) if match else (query.get("modal_id") or [""])[0]
-    if re.fullmatch(r"\d{16,22}", identity):
+    if re.fullmatch(r"[0-9]{16,22}", identity):
         return f"https://www.douyin.com/video/{identity}", identity
     if parsed.hostname == "v.douyin.com" and re.fullmatch(r"/[A-Za-z0-9_-]{3,80}/?", parsed.path):
         return f"https://v.douyin.com{parsed.path}", ""
@@ -69,6 +69,27 @@ def safe_media_url(value):
             and parsed.port in (None, 443)
             and bool(parsed.hostname)
             and any(parsed.hostname == domain or parsed.hostname.endswith("." + domain) for domain in MEDIA_DOMAINS)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def safe_caption_url(value):
+    """Only text-track addresses supplied by matching platform metadata."""
+    if safe_media_url(value):
+        return True
+    try:
+        parsed = urlsplit(value)
+        return (
+            parsed.scheme == "https"
+            and not parsed.username
+            and not parsed.password
+            and parsed.port in (None, 443)
+            and bool(parsed.hostname)
+            and any(
+                parsed.hostname == domain or parsed.hostname.endswith("." + domain)
+                for domain in ("bytescm.com", "douyinstatic.com")
+            )
         )
     except (TypeError, ValueError):
         return False
@@ -107,36 +128,7 @@ def inspect_video(data):
     urls = list(
         dict.fromkeys(url for address in addresses for url in address.get("url_list", []) if safe_media_url(url))
     )
-    tracks = []
-    infos = (data.get("subtitle_infos") or []) + (video.get("subtitleInfos") or [])
-    infos += (video.get("subtitle") or {}).get("subtitleInfos") or []
-    infos += (video.get("cla_info") or {}).get("caption_infos") or []
-    for sticker in data.get("interaction_stickers") or []:
-        infos += (sticker.get("auto_video_caption_info") or {}).get("auto_captions") or []
-    for info in infos:
-        address = info.get("Url") or info.get("url")
-        if isinstance(address, dict):
-            address = next(iter(address.get("url_list") or []), "")
-        if not safe_media_url(address):
-            continue
-        language = (
-            info.get("LanguageCodeName")
-            or info.get("languageCodeName")
-            or info.get("lang")
-            or info.get("language")
-            or "und"
-        )
-        if any(track["_url"] == address for track in tracks):
-            continue
-        tracks.append(
-            {
-                "id": f"platform:{len(tracks)}",
-                "language": str(language),
-                "name": str(language),
-                "source": "platform",
-                "_url": address,
-            }
-        )
+    tracks = discover_caption_tracks(data, safe_caption_url)
     duration = float(video.get("duration") or data.get("duration") or 0) / 1000
     return {
         "platform": "douyin",
@@ -148,52 +140,6 @@ def inspect_video(data):
         "tracks": tracks,
         "_media_urls": urls,
     }
-
-
-def caption_records(text):
-    """Read timed JSON utterances or SRT/WebVTT without fabricating durations."""
-    records = []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = None
-    if isinstance(data, dict) and isinstance(data.get("utterances"), list):
-        for cue in data["utterances"]:
-            records.append(
-                {
-                    "start": float(cue["start_time"]) / 1000,
-                    "duration": (float(cue["end_time"]) - float(cue["start_time"])) / 1000,
-                    "text": str(cue.get("text") or ""),
-                }
-            )
-    else:
-
-        def seconds(value):
-            parts = value.replace(",", ".").split(":")
-            return sum(float(part) * 60**index for index, part in enumerate(reversed(parts)))
-
-        for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n")):
-            lines = block.strip().splitlines()
-            for index, line in enumerate(lines):
-                match = re.match(r"([\d:. ,]+?)\s*-->\s*([\d:.,]+)", line)
-                if match:
-                    start, end = map(seconds, match.groups())
-                    wording = html.unescape(re.sub(r"<[^>]+>", "", "\n".join(lines[index + 1 :])))
-                    records.append({"start": start, "duration": end - start, "text": wording})
-                    break
-    if not records or any(
-        not cue["text"].strip()
-        or not math.isfinite(cue["start"] + cue["duration"])
-        or cue["start"] < 0
-        or cue["duration"] <= 0
-        for cue in records
-    ):
-        raise ExtractionError(
-            "captions_invalid",
-            "The returned caption track has no usable timed text. Choose another track or use speech recognition.",
-            422,
-        )
-    return records
 
 
 @dataclass
@@ -213,6 +159,8 @@ class Job:
     audio_validated: bool = False
     manual_confirmed: bool = False
     worker_exit_code: int | None = None
+    caption_probe_complete: bool = False
+    blocked_media_requests: int = 0
     action: threading.Event = field(default_factory=threading.Event)
     cancelled: threading.Event = field(default_factory=threading.Event)
     show_browser: threading.Event = field(default_factory=threading.Event)
@@ -237,6 +185,11 @@ class Job:
             and self.audio_validated
             and bool(self.media and self.media.is_file()),
             "diagnostic": {"code": self.code, "worker_exit_code": self.worker_exit_code} if self.code else None,
+            "allow_asr": self.allow_asr,
+            "captions_only": not self.allow_asr,
+            "caption_probe_complete": self.caption_probe_complete,
+            "media_downloaded": bool(self.media and self.media.is_file()),
+            "blocked_media_requests": self.blocked_media_requests,
         }
 
 
@@ -246,7 +199,7 @@ class DouyinManager:
         self.job = None
         self.worker = None
 
-    def start(self, url, allow_asr=True):
+    def start(self, url, allow_asr=False):
         normalized, identity = normalize_url(url)
         with self.lock:
             if self.job and self.job.state not in TERMINAL:
@@ -277,10 +230,14 @@ class DouyinManager:
         job = self.get(identity)
         if job.state not in {"waiting_verification", "waiting_track"}:
             raise ExtractionError("job_not_waiting", "This extraction is not waiting for confirmation.", 409)
-        job.choice = track_id
         if job.state == "waiting_verification":
             job.manual_confirmed = True
-        job.state, job.message = "reading_video", "Verification complete. The remaining steps run automatically…"
+            job.state, job.message = "reading_video", "Verification acknowledged. Checking this video's captions…"
+        else:
+            if not any(track["id"] == track_id for track in job.video["tracks"]):
+                raise ExtractionError("caption_selection_required", "Choose an available caption track.", 422)
+            job.choice = track_id
+            job.state, job.message = "downloading_captions", "Retrieving the selected caption track…"
         job.action.set()
         return job.public()
 
@@ -298,8 +255,23 @@ class DouyinManager:
                 raise ExtractionError(
                     "retry_unavailable", "This job has no acquired audio to reuse. Retry extraction.", 409
                 )
-            if self.worker:
-                self.worker.join(timeout=2)
+            previous_worker = self.worker
+        # Workers publish completion/failure under the same lock. Never wait
+        # for their exit while holding it, then recheck state after the wait.
+        if previous_worker:
+            previous_worker.join(timeout=2)
+        with self.lock:
+            job = self.get(identity)
+            if (
+                not job.public()["can_retry_speech"]
+                or self.worker is not previous_worker
+                or (previous_worker and previous_worker.is_alive())
+            ):
+                raise ExtractionError(
+                    "retry_unavailable",
+                    "The previous speech task is still stopping or has changed. Retry shortly.",
+                    409,
+                )
             job.code, job.worker_exit_code = "", None
             job.cancelled.clear()
             job.state, job.message = "transcribing", "Retrying speech recognition on the acquired video…"
@@ -323,21 +295,17 @@ class DouyinManager:
                 ),
             )
 
+    @staticmethod
+    def _check_cancelled(job):
+        if job.cancelled.is_set():
+            raise ExtractionError("cancelled", "Extraction cancelled.", 409)
+
     def _complete(self, job, lines, source, provider, language, track_id):
-        job.result = {
-            **{key: value for key, value in job.video.items() if not key.startswith("_") and key != "tracks"},
-            "success": True,
-            "source": source,
-            "provider": provider,
-            "language": language,
-            "track_id": track_id,
-            "generated_at": time.time(),
-            "transcript_lines": lines,
-            "plain_text": "\n".join(cue["text"] for cue in lines),
-            "acquisition_provider": "playwright-browser",
-            "manual_verification_confirmed": job.manual_confirmed,
-        }
-        for cue in lines:
+        self._check_cancelled(job)
+        normalized = []
+        for original in lines:
+            self._check_cancelled(job)
+            cue = dict(original)
             total = int(cue["start"])
             cue["seconds"] = total
             cue["timestamp"] = (
@@ -345,14 +313,35 @@ class DouyinManager:
                 if total >= 3600
                 else f"{total // 60:02}:{total % 60:02}"
             )
-        job.state, job.message = (
-            "completed",
-            "Transcript and Codex export ready. Speech timings are estimates."
-            if source == "asr"
-            else "Transcript and Codex export ready.",
-        )
+            normalized.append(cue)
+        result = {
+            **{key: value for key, value in job.video.items() if not key.startswith("_") and key != "tracks"},
+            "success": True,
+            "source": source,
+            "provider": provider,
+            "language": language,
+            "track_id": track_id,
+            "generated_at": time.time(),
+            "transcript_lines": normalized,
+            "plain_text": "\n".join(cue["text"] for cue in normalized),
+            "acquisition_provider": "douyin-browser-captions" if source == "platform" else "playwright-browser",
+            "manual_verification_confirmed": job.manual_confirmed,
+            "media_downloaded": job.media is not None,
+            "captions_only": not job.allow_asr,
+            "blocked_media_requests": job.blocked_media_requests,
+        }
+        with self.lock:
+            self._check_cancelled(job)
+            job.result = result
+            job.state, job.message = (
+                "completed",
+                "Transcript and Codex export ready. Speech timings are estimates."
+                if source == "asr"
+                else "Transcript and Codex export ready.",
+            )
 
     def _speech(self, job):
+        self._check_cancelled(job)
         recognized = transcribe_job(job)
         lines = [
             {
@@ -366,27 +355,35 @@ class DouyinManager:
         self._complete(job, lines, "asr", "mlx-whisper", recognized["metadata"]["language"], "asr:original")
 
     def _fail(self, job, exc):
-        job.code, job.message = exc.code, str(exc)
-        job.state = "cancelled" if exc.code == "cancelled" else "failed"
+        with self.lock:
+            if job.cancelled.is_set():
+                exc = ExtractionError("cancelled", "Extraction cancelled.", 409)
+            job.result = None
+            job.code, job.message = exc.code, str(exc)
+            job.state = "cancelled" if exc.code == "cancelled" else "failed"
         # Keep only the current failed job's acquired video/log for a direct
         # speech retry. Starting another job or normal shutdown clears it.
         if job.state == "cancelled" or not job.audio_validated:
             shutil.rmtree(job.directory, ignore_errors=True)
 
     def cancel(self, identity):
-        job = self.get(identity)
-        job.cancelled.set()
-        job.action.set()
-        return job.public()
+        with self.lock:
+            job = self.get(identity)
+            if job.state not in TERMINAL:
+                job.cancelled.set()
+                job.action.set()
+            return job.public()
 
     def shutdown(self):
-        if self.job:
-            self.job.cancelled.set()
-            self.job.action.set()
-        if self.worker:
-            self.worker.join(timeout=35)
-        if self.job:
-            shutil.rmtree(self.job.directory, ignore_errors=True)
+        with self.lock:
+            job, worker = self.job, self.worker
+            if job and job.state not in TERMINAL:
+                job.cancelled.set()
+                job.action.set()
+        if worker:
+            worker.join(timeout=35)
+        if job:
+            shutil.rmtree(job.directory, ignore_errors=True)
 
     def _wait(self, job, page, timeout=900):
         deadline = time.monotonic() + timeout
@@ -473,10 +470,24 @@ class DouyinManager:
                 profile.mkdir(parents=True, exist_ok=True)
                 os.chmod(profile, 0o700)
                 channel = "chrome" if Path("/Applications/Google Chrome.app").is_dir() else None
-                context = playwright.chromium.launch_persistent_context(str(profile), headless=False, channel=channel)
+                context = playwright.chromium.launch_persistent_context(
+                    str(profile), headless=False, channel=channel, service_workers="block"
+                )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
                     captured = []
+                    caption_urls = set()
+                    media_urls = set()
+                    media_guard = install_caption_media_guard(context, caption_urls, media_urls)
+
+                    def retain(match):
+                        captured[:] = [match]
+                        caption_urls.update(
+                            track["_url"]
+                            for track in discover_caption_tracks(match, safe_caption_url)
+                            if "_url" in track
+                        )
+                        media_urls.update(inspect_video(match)["_media_urls"])
 
                     def observe(response):
                         address = urlsplit(response.url)
@@ -491,12 +502,15 @@ class DouyinManager:
                             ):
                                 return
                             body = response.body()
+                            # Passive metadata is already loaded by the site;
+                            # only retained data is bounded here. Active refresh
+                            # and caption fetches enforce streaming read limits.
                             if len(body) > 8 * 1024 * 1024:
                                 return
                             data = json.loads(body)
                             match = find_video(data, job.identity) if job.identity else None
                             if match:
-                                captured[:] = [match]
+                                retain(match)
                         except (BrowserError, ValueError, TypeError, KeyError) as exc:
                             LOG.debug("Skipped unreadable playback response (%s)", type(exc).__name__)
 
@@ -505,46 +519,20 @@ class DouyinManager:
                     if not job.identity:
                         job.url, job.identity = normalize_url(page.url)
                     job.state, job.message = "reading_video", "Checking this video in your existing Douyin session…"
-                    for _ in range(60):
-                        if captured:
-                            break
-                        if job.cancelled.is_set():
-                            raise ExtractionError("cancelled", "Extraction cancelled.", 409)
-                        page.wait_for_timeout(250)
-                        # Public page hydration is a fallback when no detail
-                        # response was emitted. Never read account page storage.
-                        for script in page.locator('script[id="RENDER_DATA"]').all_text_contents():
-                            try:
-                                match = find_video(json.loads(unquote(script)), job.identity)
-                                if match:
-                                    captured[:] = [match]
-                            except (ValueError, TypeError):
-                                pass
+                    self._read_metadata(job, page, captured, retain)
                     if not captured:
                         job.state = "waiting_verification"
-                        job.message = "Complete Douyin's requested login or verification, then click I’ve verified, continue."
+                        job.message = (
+                            "Complete Douyin's requested login or verification, then click I’ve verified, continue."
+                        )
                         page.bring_to_front()
                         self._wait(job, page)
                         job.state, job.message = (
                             "reading_video",
-                            "Verification complete. Acquiring this video automatically…",
+                            "Verification acknowledged. Checking this video's captions…",
                         )
                         page.goto(job.url, wait_until="domcontentloaded", timeout=60000)
-                    for _ in range(60):
-                        if captured:
-                            break
-                        if job.cancelled.is_set():
-                            raise ExtractionError("cancelled", "Extraction cancelled.", 409)
-                        page.wait_for_timeout(250)
-                        # Public page hydration is a fallback when no detail
-                        # response was emitted. Never read account page storage.
-                        for script in page.locator('script[id="RENDER_DATA"]').all_text_contents():
-                            try:
-                                match = find_video(json.loads(unquote(script)), job.identity)
-                                if match:
-                                    captured[:] = [match]
-                            except (ValueError, TypeError):
-                                pass
+                        self._read_metadata(job, page, captured, retain)
                     if not captured:
                         raise ExtractionError(
                             "douyin_verification_blocked",
@@ -552,11 +540,27 @@ class DouyinManager:
                             422,
                         )
                     job.video = inspect_video(captured[0])
+                    job.state, job.message = (
+                        "probing_captions",
+                        "Looking for existing timed captions; media stays blocked…",
+                    )
+                    if not job.video["tracks"]:
+                        # Refresh only the matching video's metadata in its normal
+                        # page context. No signature generation or generic proxy.
+                        refreshed = refresh_video_metadata(page, job.identity, find_video)
+                        if refreshed:
+                            retain(refreshed)
+                            job.video = inspect_video(refreshed)
+                    job.caption_probe_complete = True
+                    self._check_cancelled(job)
                     tracks = job.video["tracks"]
+                    if len(tracks) > 1 and not job.choice:
+                        job.state, job.message = "waiting_track", "Choose an available caption track, then continue."
+                        self._wait(job, page)
                     selected = next(
                         (track for track in tracks if track["id"] == job.choice), tracks[0] if tracks else None
                     )
-                    if job.choice and selected and selected["id"] != job.choice:
+                    if job.choice and (not selected or selected["id"] != job.choice):
                         raise ExtractionError(
                             "caption_selection_required",
                             "The selected caption track is no longer available. Retry extraction.",
@@ -565,16 +569,20 @@ class DouyinManager:
                     if selected:
                         job.state = "downloading_captions"
                         job.message = "Retrieving the existing caption track…"
-                        path = job.directory / "captions.txt"
-                        self._download(job, context, selected["_url"], path, 10 * 1024 * 1024)
-                        lines = caption_records(path.read_text())
+                        text = selected.get("_inline")
+                        if text is None:
+                            text = read_caption_text(job, page, selected["_url"], safe_caption_url)
+                        self._check_cancelled(job)
+                        lines = caption_records(text)
+                        self._check_cancelled(job)
                         source, provider, language = "platform", "douyin-browser", selected["language"]
                         track_id = selected["id"]
                     else:
                         if not job.allow_asr:
                             raise ExtractionError(
                                 "captions_not_found",
-                                "No caption track was found in the playback data. Enable local speech recognition or import captions.",
+                                "No retrievable timed captions were exposed for this video. No media was downloaded. "
+                                "You can opt in to local speech recognition and retry, or use a video with captions.",
                                 422,
                             )
                         check_setup()
@@ -602,11 +610,14 @@ class DouyinManager:
                                 "Douyin returned no usable video with audio. Check playback in its window, then retry extraction.",
                                 422,
                             )
+                        job.blocked_media_requests = media_guard["blocked_media_requests"]
                         context.close()
                         self._speech(job)
+                    job.blocked_media_requests = media_guard["blocked_media_requests"]
                     if selected:
                         self._complete(job, lines, source, provider, language, track_id)
                 finally:
+                    job.blocked_media_requests = media_guard["blocked_media_requests"]
                     try:
                         context.close()
                     except BrowserError:
@@ -623,6 +634,32 @@ class DouyinManager:
                     422,
                 ),
             )
+
+    def _read_metadata(self, job, page, captured, retain):
+        """Observe matching JSON/hydration, with a restricted page-context refresh."""
+        for attempt in range(60):
+            self._check_cancelled(job)
+            if captured:
+                return
+            page.wait_for_timeout(250)
+            self._check_cancelled(job)
+            for script in page.locator('script[id="RENDER_DATA"]').all_text_contents():
+                try:
+                    if len(script.encode("utf-8")) > 8 * 1024 * 1024:
+                        continue
+                    match = find_video(json.loads(unquote(script)), job.identity)
+                    if match:
+                        self._check_cancelled(job)
+                        retain(match)
+                        return
+                except (ValueError, TypeError, UnicodeError):
+                    pass
+            if attempt in {3, 31}:
+                match = refresh_video_metadata(page, job.identity, find_video)
+                self._check_cancelled(job)
+                if match:
+                    retain(match)
+                    return
 
 
 manager = DouyinManager()

@@ -62,7 +62,7 @@ class ExtractRequest(VideoRequest):
 
 
 class DouyinRequest(VideoRequest):
-    allow_asr: bool = True
+    allow_asr: bool = False
 
 
 class ConfirmRequest(BaseModel):

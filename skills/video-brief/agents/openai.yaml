@@ -1,6 +1,6 @@
 interface:
   display_name: "Video Brief"
-  short_description: "Video briefs with illustrated takeaways and precise jumps"
-  default_prompt: "Use $video-brief to read the entire transcript, inspect referenced source-video visuals with screenshots, and give me a short overview, takeaways enriched with visible details and verified visual jump timestamps, and the sections most worth watching; retain explanation links where useful and flag uncertainty."
+  short_description: "Illustrated video briefs, critical questions, and precise jumps"
+  default_prompt: "Use $video-brief to read the entire transcript, inspect referenced visuals, and give me a concise overview, illustrated takeaways, and a selective watch list; include consequential claims worth checking, clearly labelled plausible alternatives, and precise links to the claim, its support, and relevant qualifications so I can judge for myself."
 policy:
   allow_implicit_invocation: true

@@ -6,7 +6,7 @@ import EmptyState from './components/EmptyState';
 import ErrorToast from './components/ErrorToast';
 import CodexUsage from './components/CodexUsage';
 import DouyinProgress from './components/DouyinProgress';
-import { isRunning, primaryAction } from './lib/douyin-flow';
+import { DEFAULT_DOUYIN_ALLOW_ASR, isRunning, primaryAction } from './lib/douyin-flow';
 import { channelMismatch, channelStatus, CHANNELS } from './lib/channels';
 import { buildCodexHandoff, CODEX_PROMPT, downloadExport, formatTime, safeFilename, timestampLink } from './lib/transcript';
 
@@ -78,7 +78,7 @@ function CodexHandoff({ data, active, onError }) {
         </button>
       </div>
       <p className="handoff-instruction">Copy and paste into Codex, or attach the downloaded file and ask Codex to follow its opening instructions.</p>
-      <p className="handoff-note">The included prompt asks Codex to set up the video-brief skill if needed, then illustrate the takeaways with screenshots and precise video links.</p>
+      <p className="handoff-note">The prompt guides Codex to illustrate the takeaways, examine important claims and plausible alternatives, and link to the passages you can judge for yourself. It includes skill setup if needed.</p>
       <details className="handoff-details">
         <summary>View the included prompt</summary>
         <p className="handoff-prompt">{CODEX_PROMPT}</p>
@@ -100,7 +100,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [job, setJob] = useState(null);
-  const [allowAsr, setAllowAsr] = useState(true);
+  const [allowAsr, setAllowAsr] = useState(DEFAULT_DOUYIN_ALLOW_ASR);
   const [confirming, setConfirming] = useState(false);
   const urlInput = useRef(null);
   const touched = useRef(false);
@@ -115,10 +115,14 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
   useEffect(() => { onStatus(platform, status); }, [platform, status, onStatus]);
   const jobId = job?.id;
   const polling = isRunning(job);
-  const action = primaryAction(job);
+  const action = primaryAction(job, trackId);
   const applyJob = useCallback((current) => {
     setJob(current);
+    if (typeof current.allow_asr === 'boolean') setAllowAsr(current.allow_asr);
     if (current.video) setVideo(current.video);
+    if (current.state === 'waiting_track') {
+      setTrackId((selected) => current.video?.tracks?.some((track) => track.id === selected) ? selected : '');
+    }
     if (current.state === 'completed') setResult(current.result);
     setStage(isRunning(current) ? current.message : '');
     setError('');
@@ -189,6 +193,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
     event.preventDefault();
     touched.current = true;
     if (mismatch) { setError(mismatch); return; }
+    if (douyin && !action.enabled) return;
     if (douyin && action.action === 'confirm') { await confirmDouyin(); return; }
     if (douyin && action.action === 'retry-speech') {
       setConfirming(true);
@@ -203,6 +208,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
     setResult(null);
     setSearch('');
     if (douyin) {
+      setJob(null);
       setStage('Opening your Douyin session…');
       try { applyJob(await post('/api/douyin/jobs', { url: url.trim(), allow_asr: allowAsr })); }
       catch (failure) { setError(failure.message); setStage(''); }
@@ -265,18 +271,19 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
           </div>
           <p id={`${platform}-url-hint`} className={`field-hint ${mismatch ? 'accent-text' : ''}`}>{mismatch || channel.urlHint}</p>
           {douyin && <div className="douyin-options">
+            <p className="caption-mode-note"><strong>Captions only by default.</strong> Retrieve exposed timed text without downloading audio, video, or speech models. Some videos have no usable caption track.</p>
             <div className="verification-note"><ExternalLink size={17} aria-hidden="true" /><div><h3>A separate Douyin window</h3><p>If Douyin asks you to log in or verify, complete it there. Return here and click <strong>I’ve verified, continue</strong>.</p><p>A working saved session continues automatically.</p></div></div>
-            <label className="checkbox-label"><input type="checkbox" checked={allowAsr} disabled={loading || confirming} onChange={(event) => setAllowAsr(event.target.checked)} /><span>Use local speech recognition<span className="checkbox-hint">When no caption track is available.</span></span></label>
-            <details className="speech-setup"><summary>One-time speech setup</summary><p>Apple Silicon Mac and FFmpeg required. Run <code>./setup-douyin.sh</code> once to install the local speech environment and about 1.6 GB of model weights. Speech processing temporarily saves this video on your Mac.</p><a href="https://github.com/Jack-Li-Npu/video-content-extractor/blob/main/docs/DOUYIN.md" target="_blank" rel="noopener noreferrer">Open setup guide <ExternalLink size={13} /></a></details>
+            <label className="checkbox-label"><input type="checkbox" checked={allowAsr} disabled={loading || confirming} onChange={(event) => setAllowAsr(event.target.checked)} /><span>Allow video download for local speech recognition<span className="checkbox-hint">Optional fallback when no timed captions are exposed. Downloads the source video and uses a local speech model.</span></span></label>
+            {allowAsr && <details className="speech-setup"><summary>One-time speech setup</summary><p>Apple Silicon Mac and FFmpeg required. Run <code>./setup-douyin.sh</code> once to install the local speech environment and about 1.6 GB of model weights. Speech processing temporarily saves this video on your Mac.</p><a href="https://github.com/Jack-Li-Npu/video-content-extractor/blob/main/docs/DOUYIN.md" target="_blank" rel="noopener noreferrer">Open setup guide <ExternalLink size={13} /></a></details>}
           </div>}
-          {!douyin && video?.tracks.length > 0 && (
+          {video?.tracks.length > 0 && (!douyin || job?.state === 'waiting_track') && (
             <div className="track-field">
               <label htmlFor={`${platform}-caption-track`}>Caption track</label>
-              <select id={`${platform}-caption-track`} value={trackId} disabled={loading} onChange={(event) => { setTrackId(event.target.value); setResult(null); setError(''); setSearch(''); }}>
+              <select id={`${platform}-caption-track`} value={trackId} disabled={confirming || (loading && job?.state !== 'waiting_track')} onChange={(event) => { setTrackId(event.target.value); setResult(null); setError(''); setSearch(''); }}>
                 <option value="" disabled>Choose a caption language</option>
                 {video.tracks.map((track) => <option key={track.id} value={track.id}>{track.name} ({track.language}) · {track.source === 'platform' ? 'Platform captions' : track.source === 'uploaded' ? 'Uploaded' : 'Automatic'}</option>)}
               </select>
-              {!trackId && <p className="field-hint accent-text">Choose a caption track, then get the transcript.</p>}
+              {!trackId && <p className="field-hint accent-text">{douyin ? 'Choose a caption track, then click Use selected captions.' : 'Choose a caption track, then get the transcript.'}</p>}
             </div>
           )}
           <button disabled={!url.trim() || Boolean(mismatch) || confirming || (douyin ? !action.enabled || (loading && !job) : loading)} type="submit" className="button button-primary extract-button">
@@ -285,10 +292,10 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
           <ErrorToast error={error} onClose={() => setError('')} />
         </form>
         {video && <VideoInfo key={video.video_id} data={video} />}
-        <p className="source-footnote">{douyin ? 'Your login stays in the local Douyin browser profile. Starting another Douyin job replaces its temporary video.' : 'Existing captions only. No video downloads, speech models, or separate login window.'}</p>
+        <p className="source-footnote">{douyin ? 'Your login stays in the local Douyin browser profile. Starting another Douyin job replaces the previous result and any temporary video.' : 'Existing captions only. No video downloads, speech models, or separate login window.'}</p>
       </aside>
 
-      <section className={`transcript-panel ${result && !loading ? 'has-transcript' : ''}`} aria-label="Full transcript" aria-busy={loading && job?.state !== 'waiting_verification'}>
+      <section className={`transcript-panel ${result && !loading ? 'has-transcript' : ''}`} aria-label="Full transcript" aria-busy={loading && !['waiting_verification', 'waiting_track'].includes(job?.state)}>
         <div className="panel-header">
           <h2>Transcript</h2>
           {result && !loading ? <span className="ready-label"><Check size={13} />Ready for Codex</span> : <span className="panel-meta">{channel.name}</span>}
@@ -300,7 +307,8 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
                 <p className="transcript-meta"><span>{result.transcript_lines.length.toLocaleString()} segments</span><span className="language-label">{result.language}</span></p>
               </div>
               {result.source === 'asr' && <p className="speech-notice">Locally generated speech captions. Wording and timing are estimates; verify names and flagged passages against playback. On-screen text is not included.</p>}
-              {result.local_viewer_url && <p className="field-hint">Click any timestamp to watch the local video. Keep this extractor running while Codex reviews it.</p>}
+              {douyin && result.media_downloaded === false && <p className="caption-mode-note result-caption-note">Retrieved Douyin timed captions. No audio, video, or speech model was downloaded. Timestamps preserve the caption track’s timing; Douyin public links do not provide reliable exact seeking.</p>}
+              {result.local_viewer_url && result.media_downloaded !== false && <p className="field-hint">Click any timestamp to watch the local video. Keep this extractor running while Codex reviews it.</p>}
               <CodexHandoff key={`${result.track_id}-${result.generated_at}`} data={result} active={active} onError={setError} />
             </div>
             <div className="reader-toolbar">

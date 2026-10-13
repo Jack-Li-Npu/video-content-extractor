@@ -1,11 +1,11 @@
 ---
 name: video-brief
-description: Turn a complete timestamped video transcript into illustrated takeaways and a selective watch list, enriching captions with inspected source-video screenshots and verified visual jump timestamps. Use especially with Transcript app Markdown exports. Does not fetch captions or transcribe media.
+description: Turn a complete timestamped video transcript into illustrated takeaways, a selective watch list, and a balanced review of consequential claims with source timestamps and clearly labelled alternative explanations. Use especially with Transcript app Markdown exports. Does not fetch captions or transcribe media.
 ---
 
 # Video brief
 
-Help the user understand a video's key ideas and jump directly to the moments that explain them. Read the supplied transcript, inspect referenced visuals, and use what is visible to enrich the relevant takeaways and refine their jump targets. Analysis takes place here, separately from the caption extractor.
+Help the user understand a video's key ideas, examine its reasoning, and jump directly to the moments needed to judge it. Read the supplied transcript, inspect referenced visuals, and use what is visible to enrich the relevant takeaways and refine their jump targets. Analysis takes place here, separately from the caption extractor.
 
 ## Read and establish coverage
 
@@ -42,14 +42,23 @@ Automatic captions may mishear names, numbers, or technical terms. Flag conseque
 
 For every substantive takeaway, keep a supporting caption interval. Re-read that interval and its neighboring captions before citing it, especially for numbers, negations, and apparent contradictions. Prefer paraphrase to long quotations. Use the user's language for the brief while retaining important original terms when useful; do not translate or rewrite the source file.
 
+## Help the user examine important claims
+
+- Select the few claims whose uncertainty would materially change the video's conclusion or the user's decision. Look for assumptions, causal leaps, missing comparisons or denominators, selective evidence, internal tensions, and forecasts presented with more confidence than their support warrants. Check later qualifications and corrections before raising a concern. Caption/ASR ambiguity is a source limitation, not evidence that the speaker is wrong.
+- For each useful review point, fairly paraphrase the speaker's claim and the support shown in the supplied material, explain the specific open question, and give the strongest relevant counterargument or alternative explanation. Label whether that alternative is raised in the video or is your own hypothesis. Do not invent opposing experts, studies, data, or a consensus; do not manufacture disagreement or give weak objections equal weight to strong evidence.
+- Separate speaker claims, inspected visual observations, and your reasoning. A screenshot can confirm what a chart displays; it cannot independently validate the chart's data or a causal conclusion. Missing support in the supplied material does not establish that no support exists elsewhere. Keep external verification separate and perform it only when requested; otherwise say when a factual dispute cannot be resolved from the video.
+- Give a concrete question or observation that would help the user decide, with a **Review claim** timestamp/range and any separate **See support** or **Hear qualification** link. Choose the earliest relevant supplied caption boundary needed to understand the claim fairly; use the existing visual-inspection workflow for chart-dependent concerns. Preserve context and distinguish caption-derived jumps from visually verified ones. If links cannot seek, give the time and source with that limitation.
+- Keep this selective: usually 1–3 consequential review points, fewer when warranted. If no material concern is supported, say so briefly. Help the user judge the argument without assigning an unsupported truth score or labelling the video or speaker deceptive.
+
 ## Deliver a viewing guide
 
 Adapt the length to the user's request; a useful default is:
 
 1. **Quick overview:** a short paragraph describing the central question and the video's main answer. Frame it as a summary of the speaker's argument.
 2. **Key points:** usually 5–8 distinct insights, each with a compact explanation and a clickable supporting timestamp or range. Enrich visual-dependent points with the observed details, an adjacent screenshot or image link, and a verified visual jump; add a separate explanation jump when useful. Choose fewer for short videos. Include a meaningful caveat or counterargument where present.
-3. **Worth watching:** a short prioritized list of passages with start/end times and one sentence about what the user gains by watching each. Favor explanations, demonstrations, or contested exchanges over merely repeating the takeaways. Refine visually dependent destinations from inspected playback rather than automatically using the spoken cue. These are suggested ranges, not official chapters.
-4. **Coverage / uncertainty:** a short line noting the caption source, actual range and segment count read, which referenced visuals were inspected, and any material missing, unreadable, or unverified content. Add questions left unresolved only when useful.
+3. **Claims worth checking:** a compact critical review when warranted, using the guidance above. For each point, connect the claim, its support/limits, a labelled plausible alternative, and what to check to the precise source passage. This is a guide to evaluating the argument, not a factual verdict. Omit it for a summary-only request.
+4. **Worth watching:** a short prioritized list of passages with start/end times and one sentence about what the user gains by watching each. Favor explanations, demonstrations, or contested exchanges over merely repeating the takeaways. Refine visually dependent destinations from inspected playback rather than automatically using the spoken cue. Include review passages where useful without duplicating their full analysis. These are suggested ranges, not official chapters.
+5. **Coverage / uncertainty:** a short line noting the caption source, actual range and segment count read, which referenced visuals were inspected, and any material missing, unreadable, or unverified content. State when the critical review is based only on the supplied source rather than external fact-checking. Add questions left unresolved only when useful.
 
 For YouTube links, use the supplied validated video ID: `https://www.youtube.com/watch?v=VIDEO_ID&t=SECONDSs`. Floor a caption start or verified visual frame time to whole seconds for its jump link. Display `MM:SS` or `HH:MM:SS`; retain the precise caption interval and actual capture time in the evidence records. Caption-derived ranges use relevant caption boundaries; visual-derived ranges use verified playback positions and must be identified as such. Do not fabricate convenient chapter times. Verify caption timestamps against the supplied transcript and visual timestamps against the confirmed source video and duration; identify visual-only moments outside the caption coverage explicitly.
 

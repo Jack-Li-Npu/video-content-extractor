@@ -184,6 +184,9 @@ mark { background: var(--mark); color: var(--on-mark); padding: 1px 0; border-ra
 .app-footer a:hover { color: var(--accent); }
 .app-footer a span { border-left: 1px solid var(--line); padding-left: 7px; margin-left: 1px; font: 11px var(--mono); }
 .douyin-options { margin-top: 24px; }
+.caption-mode-note { font-size: 13px; line-height: 1.8; color: var(--muted); margin-bottom: 16px; }
+.caption-mode-note strong { color: var(--ink); font-weight: 550; }
+.result-caption-note { margin: 20px 0 0; }
 .verification-note { display: flex; gap: 10px; padding: 16px; background: var(--soft); border-radius: var(--radius); }
 .verification-note > svg { margin-top: 3px; color: var(--muted); }
 .verification-note h3 { font-size: 14px; font-weight: 550; line-height: 1.6; }

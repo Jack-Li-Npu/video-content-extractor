@@ -11,9 +11,9 @@ export const CHANNELS = {
   },
   douyin: {
     name: 'Douyin',
-    summary: 'Browser access + local speech',
-    heading: 'Douyin transcript',
-    description: 'Use your local browser session to access a public video.',
+    summary: 'Timed captions + manual verification',
+    heading: 'Douyin captions',
+    description: 'Read available timed captions through your local Douyin session.',
     placeholder: 'https://www.douyin.com/video/…',
     urlHint: 'Video, jingxuan, and v.douyin.com share links are supported.',
   },
@@ -29,6 +29,7 @@ export function channelMismatch(url, platform) {
 
 export function channelStatus({ job, loading, result, error }) {
   if (job?.state === 'waiting_verification') return 'Needs verification';
+  if (job?.state === 'waiting_track') return 'Choose captions';
   if (loading || isRunning(job)) return 'Extracting';
   if (error || job?.state === 'failed') return 'Needs attention';
   if (result) return 'Ready';

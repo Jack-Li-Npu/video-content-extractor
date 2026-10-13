@@ -120,9 +120,18 @@ test('Douyin speech export preserves the complete source and labels estimated ti
 });
 
 test('Douyin original captions retain platform timing and require the right identity', () => {
-  const douyin = { ...data, platform: 'douyin', video_id: '7685972770793999667', source: 'platform' };
+  const douyin = { ...data, platform: 'douyin', video_id: '7685972770793999667', source: 'platform',
+    acquisition_provider: 'douyin-browser-captions', media_downloaded: false, captions_only: true };
   const metadata = JSON.parse(readFences(buildTranscriptExport(douyin).content)[0].text);
   assert.equal(metadata.timestamps, 'platform_caption_timing');
   assert.equal(metadata.caption_source, 'platform');
+  assert.equal(metadata.acquisition_provider, 'douyin-browser-captions');
+  assert.equal(metadata.media_downloaded, false);
+  assert.equal(metadata.captions_only, true);
+  assert.equal(metadata.local_viewer_url, null);
+  assert.equal(timestampLink(douyin, 3601.125), null, 'caption timing is retained without inventing Douyin seek links');
+  const staleViewer = { ...douyin, local_viewer_url: 'http://127.0.0.1:8000/api/douyin/jobs/old/viewer' };
+  assert.equal(timestampLink(staleViewer, 10), null);
+  assert.equal(JSON.parse(readFences(buildTranscriptExport(staleViewer).content)[0].text).local_viewer_url, null);
   assert.throws(() => buildTranscriptExport({ ...douyin, video_id: 'Hrbq66XqtCo' }), /video ID/);
 });
