@@ -16,6 +16,52 @@ URL = f"https://www.douyin.com/video/{VIDEO}"
 CAPTION_URL = "https://captions.douyinvod.com/track.json"
 
 
+@pytest.mark.parametrize("configured, expected", [("chrome", "chrome"), ("chromium", None), ("msedge", "msedge")])
+def test_browser_channel_can_be_selected_without_reading_a_personal_profile(monkeypatch, configured, expected):
+    monkeypatch.setenv("DOUYIN_BROWSER_CHANNEL", configured)
+    assert douyin_browser.browser_channel() == expected
+
+
+def test_invalid_browser_channel_has_an_actionable_configuration_error(monkeypatch):
+    monkeypatch.setenv("DOUYIN_BROWSER_CHANNEL", "private-browser-token")
+    with pytest.raises(ExtractionError) as error:
+        douyin_browser.browser_channel()
+    assert error.value.code == "browser_setup_required"
+    assert "private-browser-token" not in str(error.value)
+
+
+@pytest.mark.parametrize("installed_in", [None, "PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"])
+def test_windows_auto_uses_installed_chrome_or_playwright_chromium(tmp_path, monkeypatch, installed_in):
+    monkeypatch.setenv("DOUYIN_BROWSER_CHANNEL", "auto")
+    monkeypatch.setattr(douyin_browser.sys, "platform", "win32")
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        location = tmp_path / variable.replace("(", "").replace(")", "")
+        monkeypatch.setenv(variable, str(location))
+        if variable == installed_in:
+            executable = location / "Google/Chrome/Application/chrome.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"synthetic executable marker")
+    assert douyin_browser.browser_channel() == ("chrome" if installed_in else None)
+
+
+@pytest.mark.parametrize(
+    "message, code",
+    [
+        ("ProcessSingleton lock failure", "browser_profile_in_use"),
+        ("user data directory is already in use", "browser_profile_in_use"),
+        ("Executable doesn't exist", "browser_not_installed"),
+        ("Chromium distribution 'chrome' is not found", "browser_not_installed"),
+        ("Target page, context or browser has been closed", "browser_closed"),
+        ("Timeout 60000ms exceeded", "browser_timeout"),
+        ("unexpected protocol error", "browser_failed"),
+    ],
+)
+def test_browser_failures_have_safe_platform_instructions(message, code):
+    result = douyin_browser.browser_failure(BrowserError(message + " https://private.test/?token=secret"))
+    assert result.code == code
+    assert "private.test" not in str(result) and "secret" not in str(result)
+
+
 def page_with_response(response):
     page = MagicMock()
     page.url = URL

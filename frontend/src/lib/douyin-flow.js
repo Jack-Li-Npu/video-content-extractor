@@ -2,6 +2,29 @@ const terminal = new Set(['completed', 'failed', 'cancelled']);
 
 export const DEFAULT_DOUYIN_ALLOW_ASR = false;
 
+const speechSetupCodes = new Set(['speech_setup_required', 'speech_runtime_missing', 'model_missing']);
+
+export function speechSetupGuidance(capabilities) {
+  const speech = capabilities?.speech;
+  if (!speech) return {
+    available: false,
+    message: 'Local speech recognition requires a separate one-time setup. This does not affect existing captions.',
+    setupHint: 'On Windows, run setup-douyin.ps1. On Apple Silicon Mac, run ./setup-douyin.sh.',
+  };
+  return {
+    available: speech.available === true,
+    message: typeof speech.message === 'string' ? speech.message : 'Check the local speech setup before enabling this fallback.',
+    setupHint: typeof speech.setup_hint === 'string' ? speech.setup_hint : 'Open the setup guide for your platform.',
+  };
+}
+
+export function failureGuidance(job) {
+  if (job.can_retry_speech) return 'Click Retry speech recognition. The acquired video is kept, so no new login or download is needed.';
+  if (job.code === 'captions_not_found') return 'No audio, video, or speech model was downloaded. This is a missing-caption result, not a login error. Try another video, or prepare local speech recognition and enable its video-download fallback before retrying.';
+  if (speechSetupCodes.has(job.code)) return 'Caption checking finished, but the local speech setup is incomplete. Complete the setup shown in the source panel, restart the extractor, then retry. The browser closing at this point does not mean login failed.';
+  return 'Follow the instruction above, then click Retry extraction. The separate browser closes when the job ends.';
+}
+
 export function isRunning(job) {
   return Boolean(job && !terminal.has(job.state));
 }
@@ -26,7 +49,7 @@ export function progressSteps(job) {
     || (state === 'failed' && job.allow_asr && probeComplete && !tracksFound));
   if (speech) {
     const acquired = Boolean(job?.can_retry_speech || ['transcribing', 'completed'].includes(state));
-    const setupNeeded = !acquired && ['speech_setup_required', 'speech_runtime_missing'].includes(job?.code);
+    const setupNeeded = !acquired && speechSetupCodes.has(job?.code);
     return [
       { label: 'Access this video', done: access, current: !access },
       { label: 'Check for existing timed captions', done: true, current: false },

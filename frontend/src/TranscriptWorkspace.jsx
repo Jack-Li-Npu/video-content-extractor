@@ -6,7 +6,7 @@ import EmptyState from './components/EmptyState';
 import ErrorToast from './components/ErrorToast';
 import CodexUsage from './components/CodexUsage';
 import DouyinProgress from './components/DouyinProgress';
-import { DEFAULT_DOUYIN_ALLOW_ASR, isRunning, primaryAction } from './lib/douyin-flow';
+import { DEFAULT_DOUYIN_ALLOW_ASR, isRunning, primaryAction, speechSetupGuidance } from './lib/douyin-flow';
 import { channelMismatch, channelStatus, CHANNELS } from './lib/channels';
 import { buildCodexHandoff, CODEX_PROMPT, downloadExport, formatTime, safeFilename, timestampLink } from './lib/transcript';
 
@@ -21,7 +21,7 @@ async function post(path, body) {
       body: JSON.stringify(body), signal: AbortSignal.timeout(120000),
     });
   } catch {
-    throw new Error('Could not reach the local extractor. Check that start.command is running, then retry.');
+    throw new Error('Could not reach the local extractor. Start the app using its launcher, then retry.');
   }
   const data = await response.json();
   if (!response.ok) throw new Error(data.message || 'The request failed. Check the video link and retry.');
@@ -101,6 +101,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
   const [search, setSearch] = useState('');
   const [job, setJob] = useState(null);
   const [allowAsr, setAllowAsr] = useState(DEFAULT_DOUYIN_ALLOW_ASR);
+  const [capabilities, setCapabilities] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const urlInput = useRef(null);
   const touched = useRef(false);
@@ -116,6 +117,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
   const jobId = job?.id;
   const polling = isRunning(job);
   const action = primaryAction(job, trackId);
+  const speechSetup = speechSetupGuidance(capabilities);
   const applyJob = useCallback((current) => {
     setJob(current);
     if (typeof current.allow_asr === 'boolean') setAllowAsr(current.allow_asr);
@@ -127,6 +129,16 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
     setStage(isRunning(current) ? current.message : '');
     setError('');
   }, []);
+
+  useEffect(() => {
+    if (!douyin) return;
+    const controller = new AbortController();
+    fetch(`${API_BASE_URL}/api/capabilities`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => { if (!controller.signal.aborted) setCapabilities(data); })
+      .catch(() => { /* Setup instructions remain available if capability checking fails. */ });
+    return () => controller.abort();
+  }, [douyin]);
 
   useEffect(() => {
     let active = true;
@@ -164,7 +176,7 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
         if (!isRunning(current)) return;
       } catch (failure) {
         if (!active) return;
-        setError(failure.name === 'AbortError' ? 'The local extractor is not responding. Check start.command; status will retry.' : failure.message);
+        setError(failure.name === 'AbortError' ? 'The local extractor is not responding. Check its launcher; status will retry.' : failure.message);
       } finally { clearTimeout(timeout); }
       if (active) timer = setTimeout(poll, 1500);
     }
@@ -272,9 +284,9 @@ export default function TranscriptWorkspace({ platform, active, onStatus }) {
           <p id={`${platform}-url-hint`} className={`field-hint ${mismatch ? 'accent-text' : ''}`}>{mismatch || channel.urlHint}</p>
           {douyin && <div className="douyin-options">
             <p className="caption-mode-note"><strong>Captions only by default.</strong> Retrieve exposed timed text without downloading audio, video, or speech models. Some videos have no usable caption track.</p>
-            <div className="verification-note"><ExternalLink size={17} aria-hidden="true" /><div><h3>A separate Douyin window</h3><p>If Douyin asks you to log in or verify, complete it there. Return here and click <strong>I’ve verified, continue</strong>.</p><p>A working saved session continues automatically.</p></div></div>
+            <div className="verification-note"><ExternalLink size={17} aria-hidden="true" /><div><h3>A separate Douyin window</h3><p>If extraction pauses for verification, complete Douyin’s requested check there, then return and click <strong>I’ve verified, continue</strong>.</p><p>Public videos may be accessible without login. The window closes when its work ends; check the result here.</p></div></div>
             <label className="checkbox-label"><input type="checkbox" checked={allowAsr} disabled={loading || confirming} onChange={(event) => setAllowAsr(event.target.checked)} /><span>Allow video download for local speech recognition<span className="checkbox-hint">Optional fallback when no timed captions are exposed. Downloads the source video and uses a local speech model.</span></span></label>
-            {allowAsr && <details className="speech-setup"><summary>One-time speech setup</summary><p>Apple Silicon Mac and FFmpeg required. Run <code>./setup-douyin.sh</code> once to install the local speech environment and about 1.6 GB of model weights. Speech processing temporarily saves this video on your Mac.</p><a href="https://github.com/Jack-Li-Npu/video-content-extractor/blob/main/docs/DOUYIN.md" target="_blank" rel="noopener noreferrer">Open setup guide <ExternalLink size={13} /></a></details>}
+            {allowAsr && <details className="speech-setup"><summary>{speechSetup.available ? 'Local speech setup' : 'One-time speech setup'}</summary><p>{speechSetup.message}</p>{!speechSetup.available && <p>{speechSetup.setupHint}</p>}<p>Speech processing temporarily saves the video on this computer. Recognition stays local; wording and timing are estimates.</p><a href="https://github.com/Jack-Li-Npu/video-content-extractor/blob/main/docs/DOUYIN.md" target="_blank" rel="noopener noreferrer">Open setup guide <ExternalLink size={13} /></a></details>}
           </div>}
           {video?.tracks.length > 0 && (!douyin || job?.state === 'waiting_track') && (
             <div className="track-field">

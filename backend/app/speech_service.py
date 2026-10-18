@@ -9,6 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .speech_runtime import WORKER, check_setup, runtime_paths, selected_backend, speech_options, worker_environment
 from .transcript_service import ExtractionError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,24 +18,40 @@ ERRORS = {
     "no_speech": "No usable speech was recognized. Check the video's audio, then retry extraction.",
     "timing_invalid": "Speech recognition returned invalid timing. Retry speech recognition; the acquired video is kept.",
     "text_invalid": "Speech recognition could not preserve the recognized text. Retry speech recognition.",
-    "model_missing": "The local speech model is incomplete. Run setup-douyin.sh, then retry speech recognition.",
+    "model_missing": "The local speech model is incomplete. Run local speech setup, then retry speech recognition.",
     "media_invalid": "The acquired file could not be read as a complete video. Retry extraction.",
     "audio_decode_failed": "The acquired audio could not be decoded. Retry extraction to try another playback version.",
-    "speech_runtime_missing": "Local speech setup is incomplete. Run setup-douyin.sh, then retry speech recognition.",
+    "speech_runtime_missing": "Local speech setup is incomplete. Run the setup command shown in the app, then retry.",
     "speech_failed": "The local speech worker failed. Retry speech recognition; the acquired video is kept.",
+    "speech_backend_invalid": "The selected local speech backend is not supported on this platform.",
+    "speech_device_unavailable": "NVIDIA speech inference is unavailable. Check the CUDA runtime and GPU memory, or select CPU.",
+    "speech_compute_unsupported": "This speech precision is not supported. Use STT_COMPUTE_TYPE=auto and restart.",
 }
 
 
-def worker_environment():
-    return {
-        **os.environ,
-        "HF_HUB_OFFLINE": "1",
-        "HF_HUB_DISABLE_TELEMETRY": "1",
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", ""),
-    }
-
-
 def probe_video(path):
+    if selected_backend() == "faster-whisper":
+        python, _ = runtime_paths()
+        try:
+            result = subprocess.run(
+                [str(python), "-B", "-X", "utf8", str(WORKER), str(path), "--probe"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                check=False, env=worker_environment(),
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            )
+            info = json.loads(result.stdout)
+            if not isinstance(info, dict):
+                raise TypeError("invalid media probe response")
+            if result.returncode:
+                raise ExtractionError("media_invalid", ERRORS["media_invalid"], 422)
+            if not info.get("has_audio"):
+                raise ExtractionError("no_audio", ERRORS["no_audio"], 422)
+            duration = float(info.get("duration", 0))
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("invalid duration")
+            return duration
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as exc:
+            raise ExtractionError("media_invalid", ERRORS["media_invalid"], 422) from exc
     executable = shutil.which("ffprobe", path=worker_environment()["PATH"])
     if not executable:
         raise ExtractionError(
@@ -61,44 +78,6 @@ def probe_video(path):
         raise ExtractionError("media_invalid", ERRORS["media_invalid"], 422) from exc
 
 
-def check_setup():
-    python = Path(os.environ.get("STT_PYTHON", str(ROOT / "stt/.venv/bin/python")))
-    model = Path(
-        os.environ.get("STT_MODEL_DIR", str(Path.home() / ".cache/efficient-content-extractor/models/whisper-turbo"))
-    )
-    if (
-        not python.is_file()
-        or not (model / "config.json").is_file()
-        or not any((model / name).is_file() for name in ("weights.npz", "weights.safetensors"))
-    ):
-        raise ExtractionError(
-            "speech_setup_required",
-            "Local speech needs one-time setup. Run setup-douyin.sh, then click Retry extraction.",
-            422,
-        )
-    if not shutil.which("ffmpeg", path=worker_environment()["PATH"]):
-        raise ExtractionError(
-            "speech_runtime_missing", "FFmpeg is missing. Install FFmpeg, then retry extraction.", 422
-        )
-    try:
-        ready = subprocess.run(
-            [
-                str(python),
-                "-c",
-                "import importlib.util; import mlx.core; assert importlib.util.find_spec('mlx_whisper')",
-            ],
-            capture_output=True,
-            timeout=30,
-            check=False,
-            env=worker_environment(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ExtractionError("speech_runtime_missing", ERRORS["speech_runtime_missing"], 422) from exc
-    if ready.returncode:
-        raise ExtractionError("speech_runtime_missing", ERRORS["speech_runtime_missing"], 422)
-    return python, model
-
-
 def worker_failure(log, returncode):
     # Never send a traceback, environment, file path or arbitrary worker text to the UI.
     with log.open("rb") as stream:
@@ -122,6 +101,18 @@ def worker_failure(log, returncode):
 
 
 def stop_process(process):
+    if os.name == "nt":
+        # This is the exact worker we created. PyAV decoding creates no child
+        # FFmpeg process; never terminate by executable name or an unbounded tree.
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=10)
@@ -139,6 +130,9 @@ def transcribe_job(job):
     log_path = job.directory / "stt.log"
     command = [
         str(python),
+        "-B",
+        "-X",
+        "utf8",
         str(ROOT / "backend/workers/local_subtitles.py"),
         str(job.media),
         "--model",
@@ -151,9 +145,18 @@ def transcribe_job(job):
         job.video["title"],
         "--video-id",
         job.identity,
+        "--backend",
+        selected_backend(),
     ]
-    with log_path.open("w") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True, env=worker_environment())
+    device, compute = speech_options()
+    command.extend(["--device", device, "--compute-type", compute])
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+    environment = worker_environment()
+    # Forced worker termination skips TemporaryDirectory cleanup. Keep decoded
+    # audio inside the job so cancellation/shutdown owns all acquired media.
+    environment.update({key: str(job.directory) for key in ("TMP", "TEMP", "TMPDIR")})
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(command, stdout=log, stderr=log, env=environment, **options)
         deadline = time.monotonic() + 3600
         while process.poll() is None:
             if job.cancelled.is_set() or time.monotonic() > deadline:
@@ -164,8 +167,8 @@ def transcribe_job(job):
         job.worker_exit_code = process.returncode
         raise worker_failure(log_path, process.returncode)
     try:
-        recognized = json.loads(Path(str(prefix) + ".json").read_text())
-        if not recognized["segments"]:
+        recognized = json.loads(Path(str(prefix) + ".json").read_text(encoding="utf-8"))
+        if not isinstance(recognized, dict) or not isinstance(recognized.get("segments"), list) or not recognized["segments"]:
             raise ValueError("empty captions")
         return recognized
     except (ValueError, KeyError, OSError) as exc:

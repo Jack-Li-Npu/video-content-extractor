@@ -26,5 +26,6 @@ verification/
 .idea/
 .vscode/
 stt/models/
+stt/windows/models/
 .runtime/
 browser-profile/

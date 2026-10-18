@@ -5,11 +5,14 @@ Models must already exist locally; inference cannot fetch a remote model.
 """
 
 import argparse
+import ctypes
 import json
 import math
 import os
+import platform
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -18,6 +21,7 @@ from pathlib import Path
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 ROOT = Path(__file__).resolve().parent
+_DLL_HANDLES = []
 
 
 class ExtractionError(RuntimeError):
@@ -26,8 +30,48 @@ class ExtractionError(RuntimeError):
         super().__init__(message)
 
 
-def probe_media(path):
+def av_module():
+    try:
+        import av
+    except (ImportError, OSError) as exc:
+        raise ExtractionError("speech_runtime_missing", "Install the optional PyAV speech runtime.") from exc
+    return av
+
+
+def probe_media_pyav(path):
+    """Probe local media through PyAV's bundled libraries, without a CLI tool."""
     path = Path(path).resolve()
+    if not path.is_file():
+        raise ExtractionError("file_missing", "The selected media file does not exist.")
+    av = av_module()
+    try:
+        with av.open(str(path), mode="r") as container:
+            has_audio = bool(container.streams.audio)
+            has_video = bool(container.streams.video)
+            durations = [
+                float(stream.duration * stream.time_base)
+                for stream in container.streams
+                if stream.duration is not None and stream.time_base is not None
+            ]
+            duration = (
+                float(container.duration / av.time_base)
+                if container.duration is not None
+                else max(durations, default=0)
+            )
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ExtractionError("media_invalid", "PyAV could not read the selected media.") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise ExtractionError("media_invalid", "The media duration is missing or invalid.")
+    return {"duration": duration, "has_audio": has_audio, "has_video": has_video}
+
+
+def probe_media(path, *, backend="mlx"):
+    path = Path(path).resolve()
+    if backend == "faster-whisper":
+        info = probe_media_pyav(path)
+        if not info["has_audio"]:
+            raise ExtractionError("no_audio", "This media has no audio stream; ASR cannot recover speech.")
+        return path, info["duration"]
     if not path.is_file():
         raise ExtractionError("file_missing", "The selected media file does not exist.")
     result = subprocess.run(
@@ -57,7 +101,77 @@ def probe_media(path):
     return path, duration
 
 
-def normalize_segments(raw, *, offset, duration, language):
+def decode_audio_pyav(path, audio, *, start, duration):
+    """Stream a bounded 16-kHz mono PCM clip, preserving media-timeline gaps."""
+    av = av_module()
+    rate = 16000
+    first, final = round(start * rate), round((start + duration) * rate)
+    written, cursor, saw_samples = first, 0, False
+    try:
+        with av.open(str(path), mode="r") as container, wave.open(str(audio), "wb") as output:
+            if not container.streams.audio:
+                raise ExtractionError("no_audio", "This media has no audio stream; ASR cannot recover speech.")
+            output.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
+            origin = float((container.start_time or 0) / av.time_base)
+
+            def fill_silence(until):
+                nonlocal written
+                while written < until:
+                    count = min(rate, until - written)
+                    output.writeframesraw(b"\0\0" * count)
+                    written += count
+
+            def write_frame(frame):
+                nonlocal written, cursor, saw_samples
+                samples = frame.to_ndarray().reshape(-1).astype("<i2", copy=False)
+                saw_samples = saw_samples or bool(len(samples))
+                position = (
+                    round((float(frame.pts * frame.time_base) - origin) * rate)
+                    if (frame.pts is not None and frame.time_base is not None)
+                    else cursor
+                )
+                cursor = max(cursor, position + len(samples))
+                left, right = max(position, first, written), min(position + len(samples), final)
+                if right > left:
+                    fill_silence(left)
+                    output.writeframesraw(samples[left - position : right - position].tobytes())
+                    written = right
+                return written >= final or position >= final
+
+            complete = False
+            for frame in container.decode(audio=0):
+                for converted in resampler.resample(frame):
+                    if write_frame(converted):
+                        complete = True
+                        break
+                if complete:
+                    break
+            if not complete:
+                for converted in resampler.resample(None):
+                    if write_frame(converted):
+                        break
+            if not saw_samples:
+                raise ExtractionError("audio_decode_failed", "PyAV could not decode the audio stream.")
+            fill_silence(final)
+    except ExtractionError:
+        raise
+    except (OSError, ValueError, OverflowError) as exc:
+        raise ExtractionError("audio_decode_failed", "PyAV could not extract the audio stream.") from exc
+
+
+def configure_windows_dlls():
+    """Register isolated NVIDIA wheel libraries before loading CTranslate2."""
+    if platform.system() != "Windows" or not hasattr(os, "add_dll_directory"):
+        return
+    nvidia = Path(sys.prefix) / "Lib/site-packages/nvidia"
+    for name in ("cublas", "cudnn", "cuda_nvrtc"):
+        folder = nvidia / name / "bin"
+        if folder.is_dir():
+            _DLL_HANDLES.append(os.add_dll_directory(str(folder)))
+
+
+def normalize_segments(raw, *, offset, duration, language, provider="mlx-whisper"):
     """Split aligned words at sentences/pauses, retaining all recognized text.
 
     Word boundaries are model estimates. If alignment cannot preserve a native
@@ -127,7 +241,7 @@ def normalize_segments(raw, *, offset, duration, language):
                     "duration": round(min(duration, cue_end) - max(0, cue_start), 3),
                     "language": language,
                     "caption_source": "asr",
-                    "provider": "mlx-whisper",
+                    "provider": provider,
                     "quality_flags": flags,
                     "words": [
                         {**w, "start": round(offset + w["start"], 3), "end": round(offset + w["end"], 3)}
@@ -140,10 +254,175 @@ def normalize_segments(raw, *, offset, duration, language):
     return output
 
 
+def select_backend(backend=None):
+    """Keep the existing Mac backend; other systems use the optional CT2 runtime."""
+    selected = backend or os.environ.get("STT_BACKEND", "auto")
+    if selected not in {"auto", "mlx", "faster-whisper"}:
+        raise ExtractionError("speech_backend_invalid", "Choose auto, mlx, or faster-whisper as the speech backend.")
+    if selected == "auto":
+        return "mlx" if platform.system() == "Darwin" else "faster-whisper"
+    return selected
+
+
+def validate_model(model, backend):
+    """Require local artifacts before importing an inference library."""
+    model = Path(model).resolve()
+    required = ("config.json",)
+    if backend == "faster-whisper":
+        required += ("model.bin", "tokenizer.json", "preprocessor_config.json")
+    if not all((model / name).is_file() for name in required) or (
+        backend == "mlx" and not any((model / name).is_file() for name in ("weights.npz", "weights.safetensors"))
+    ):
+        name = "CTranslate2 Whisper" if backend == "faster-whisper" else "MLX Whisper"
+        raise ExtractionError("model_missing", f"Install a complete local {name} model before extraction.")
+    return model
+
+
+def faster_whisper_options(ctranslate2, device=None, compute_type=None):
+    device = device or os.environ.get("STT_DEVICE", "auto")
+    compute_type = compute_type or os.environ.get("STT_COMPUTE_TYPE", "auto")
+    if device not in {"auto", "cuda", "cpu"}:
+        raise ExtractionError("speech_device_unavailable", "Choose auto, cuda, or cpu as the speech device.")
+    try:
+        if device == "auto":
+            device = "cuda" if ctranslate2.get_cuda_device_count() else "cpu"
+        elif device == "cuda" and not ctranslate2.get_cuda_device_count():
+            raise ExtractionError(
+                "speech_device_unavailable", "CUDA is unavailable. Check the NVIDIA driver or use CPU."
+            )
+        if compute_type == "auto":
+            compute_type = "int8_float16" if device == "cuda" else "int8"
+        supported = ctranslate2.get_supported_compute_types(device)
+    except (RuntimeError, OSError) as exc:
+        raise ExtractionError(
+            "speech_device_unavailable", "The speech device is unavailable. Check its runtime libraries or use CPU."
+        ) from exc
+    if compute_type not in supported and compute_type != "default":
+        raise ExtractionError(
+            "speech_compute_unsupported",
+            "The chosen speech precision is unsupported by this device. Use auto precision.",
+        )
+    return device, compute_type
+
+
+def load_faster_whisper_runtime(device=None, compute_type=None):
+    try:
+        configure_windows_dlls()
+        import ctranslate2
+        from faster_whisper import WhisperModel
+    except (ImportError, OSError) as exc:
+        raise ExtractionError("speech_runtime_missing", "Install the optional faster-whisper speech runtime.") from exc
+    device, compute_type = faster_whisper_options(ctranslate2, device, compute_type)
+    if device == "cuda" and platform.system() == "Windows":
+        try:
+            # CT2 can detect the driver while inference DLLs are absent. Load
+            # both libraries now so readiness never advertises a broken GPU.
+            for name in ("cublas64_12.dll", "cudnn64_9.dll"):
+                _DLL_HANDLES.append(ctypes.WinDLL(name))
+        except OSError as exc:
+            raise ExtractionError(
+                "speech_device_unavailable",
+                "NVIDIA speech libraries are missing. Run Windows speech setup or select CPU.",
+            ) from exc
+    return WhisperModel, device, compute_type
+
+
+def check_faster_whisper_decoder():
+    """Exercise the installed decoder API with generated data, without a model."""
+    try:
+        from faster_whisper import audio as whisper_audio
+
+        with tempfile.TemporaryDirectory(prefix="speech-runtime-check-") as folder:
+            audio = Path(folder) / "synthetic.wav"
+            with wave.open(str(audio), "wb") as stream:
+                stream.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                stream.writeframes(b"\x01\x00" * 1600)
+            samples = whisper_audio.decode_audio(str(audio))
+            if not len(samples):
+                raise ValueError("empty decoded audio")
+    except (ImportError, OSError, TypeError, ValueError, RuntimeError) as exc:
+        raise ExtractionError(
+            "speech_runtime_missing",
+            "The installed speech decoder is incompatible or incomplete. Run local speech setup again.",
+        ) from exc
+
+
+def check_runtime(*, backend=None, device=None, compute_type=None):
+    backend = select_backend(backend)
+    if backend == "faster-whisper":
+        _, device, compute_type = load_faster_whisper_runtime(device, compute_type)
+        check_faster_whisper_decoder()
+        return {"backend": backend, "provider": "faster-whisper", "device": device, "compute_type": compute_type}
+    try:
+        import mlx.core as mx
+        import mlx_whisper  # noqa: F401 - verify the optional worker dependency
+    except (ImportError, OSError) as exc:
+        raise ExtractionError("speech_runtime_missing", "Install the optional MLX Whisper speech runtime.") from exc
+    return {
+        "backend": backend,
+        "provider": "mlx-whisper",
+        "device": str(mx.default_device()),
+        "compute_type": "model_default",
+    }
+
+
+def transcribe_faster_whisper(audio, model, *, language, device=None, compute_type=None):
+    WhisperModel, device, compute_type = load_faster_whisper_runtime(device, compute_type)
+    try:
+        engine = WhisperModel(str(model), device=device, compute_type=compute_type, local_files_only=True)
+        native_segments, info = engine.transcribe(
+            str(audio),
+            language=language,
+            task="transcribe",
+            temperature=0.0,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            hallucination_silence_threshold=2.0,
+        )
+        # CT2 inference is lazy: collect it while error handling and the temporary
+        # decoded audio are still in scope. Explicit fields remain JSON-safe.
+        segments = []
+        for segment in native_segments:
+            cue = {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text,
+                "words": [
+                    {"word": word.word, "start": word.start, "end": word.end, "probability": word.probability}
+                    for word in (segment.words or [])
+                ],
+            }
+            for name in ("id", "seek", "temperature", "avg_logprob", "compression_ratio", "no_speech_prob"):
+                if hasattr(segment, name):
+                    cue[name] = getattr(segment, name)
+            segments.append(cue)
+        raw = {"segments": segments, "language": info.language, "language_probability": info.language_probability}
+        runtime = {
+            "device": engine.model.device,
+            "compute_type": engine.model.compute_type,
+        }
+        return raw, runtime
+    except (RuntimeError, ValueError, OSError) as exc:
+        # Native error strings can contain private paths, so only return a safe
+        # diagnostic. A GPU failure never silently reruns a long job on CPU.
+        detail = str(exc).casefold()
+        if any(marker in detail for marker in ("cuda", "cudnn", "cublas", "nvidia", "out of memory")):
+            raise ExtractionError(
+                "speech_device_unavailable",
+                "NVIDIA speech inference failed. Check the CUDA runtime, free GPU memory, or select CPU.",
+            ) from exc
+        raise ExtractionError(
+            "speech_failed", "The local faster-whisper worker could not transcribe this audio."
+        ) from exc
+
+
 def transcribe_file(
     media,
     *,
-    model=ROOT / "models/mlx-turbo",
+    model=None,
+    backend=None,
+    device=None,
+    compute_type=None,
     language=None,
     start=0.0,
     duration=None,
@@ -151,50 +430,53 @@ def transcribe_file(
     title="",
     video_id="",
 ):
-    path, full_duration = probe_media(media)
+    backend = select_backend(backend)
+    path, full_duration = probe_media(media, backend=backend)
     if not math.isfinite(start) or not 0 <= start < full_duration:
         raise ExtractionError("range_invalid", "The clip start is outside the media.")
     clip_duration = full_duration - start if duration is None else float(duration)
     if not math.isfinite(clip_duration) or not 0 < clip_duration <= full_duration - start + 0.1:
         raise ExtractionError("range_invalid", "The clip duration is outside the media.")
-    model = Path(model).resolve()
-    if not (model / "config.json").is_file() or not any(
-        (model / name).is_file() for name in ("weights.npz", "weights.safetensors")
-    ):
-        raise ExtractionError("model_missing", "Install a local MLX Whisper model before extraction.")
+    model = validate_model(
+        model or ROOT / ("models/ct2-turbo" if backend == "faster-whisper" else "models/mlx-turbo"), backend
+    )
+    provider = "faster-whisper" if backend == "faster-whisper" else "mlx-whisper"
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="local-subtitles-") as folder:
         audio = Path(folder) / "speech.wav"
-        decode = subprocess.run(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-v",
-                "error",
-                "-ss",
-                str(start),
-                "-i",
-                str(path),
-                "-t",
-                str(clip_duration),
-                "-map",
-                "0:a:0",
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "pcm_s16le",
-                str(audio),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
-        if decode.returncode or not audio.is_file() or audio.stat().st_size <= 44:
-            raise ExtractionError("audio_decode_failed", "FFmpeg could not extract the audio stream.")
+        if backend == "faster-whisper":
+            decode_audio_pyav(path, audio, start=start, duration=clip_duration)
+        else:
+            decode = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-ss",
+                    str(start),
+                    "-i",
+                    str(path),
+                    "-t",
+                    str(clip_duration),
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(audio),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+            if decode.returncode or not audio.is_file() or audio.stat().st_size <= 44:
+                raise ExtractionError("audio_decode_failed", "FFmpeg could not extract the audio stream.")
         # Whisper can invent text even for digital silence. Reject a zero-signal
         # PCM stream before inference. This does not detect music-only audio.
         with wave.open(str(audio), "rb") as stream:
@@ -204,24 +486,35 @@ def transcribe_file(
             else:
                 raise ExtractionError("no_speech", "The extracted audio is digital silence.")
         audio_seconds = round(time.perf_counter() - started, 3)
-        import mlx.core as mx
-        import mlx_whisper
-
-        mx.reset_peak_memory()
-        raw = mlx_whisper.transcribe(
-            str(audio),
-            path_or_hf_repo=str(model),
-            language=language,
-            task="transcribe",
-            temperature=0.0,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            hallucination_silence_threshold=2.0,
-            verbose=None,
-        )
-        mx.synchronize()
-        peak_mlx = mx.get_peak_memory()
-    segments = normalize_segments(raw["segments"], offset=start, duration=clip_duration, language=raw["language"])
+        if backend == "faster-whisper":
+            raw, runtime = transcribe_faster_whisper(
+                audio, model, language=language, device=device, compute_type=compute_type
+            )
+        else:
+            try:
+                import mlx.core as mx
+                import mlx_whisper
+            except (ImportError, OSError) as exc:
+                raise ExtractionError(
+                    "speech_runtime_missing", "Install the optional MLX Whisper speech runtime."
+                ) from exc
+            mx.reset_peak_memory()
+            raw = mlx_whisper.transcribe(
+                str(audio),
+                path_or_hf_repo=str(model),
+                language=language,
+                task="transcribe",
+                temperature=0.0,
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                hallucination_silence_threshold=2.0,
+                verbose=None,
+            )
+            mx.synchronize()
+            runtime = {"mlx_peak_allocated_bytes": mx.get_peak_memory()}
+    segments = normalize_segments(
+        raw["segments"], offset=start, duration=clip_duration, language=raw["language"], provider=provider
+    )
     return {
         "metadata": {
             "format": "video-transcript/v1",
@@ -233,7 +526,7 @@ def transcribe_file(
             "clip_duration_seconds": clip_duration,
             "language": raw["language"],
             "caption_source": "asr",
-            "provider": "mlx-whisper",
+            "provider": provider,
             "model": model.name,
             "segment_count": len(segments),
             "timestamps": "estimated_word_alignment",
@@ -245,7 +538,7 @@ def transcribe_file(
             },
             "audio_extraction_seconds": audio_seconds,
             "total_seconds": round(time.perf_counter() - started, 3),
-            "mlx_peak_allocated_bytes": peak_mlx,
+            **runtime,
             "notes": "Speech recognition can mishear names and omit speech. Timing is estimated. Editor-added translations and scene text are not recovered.",
         },
         "segments": segments,
@@ -266,12 +559,13 @@ def export(result, prefix):
     prefix.parent.mkdir(parents=True, exist_ok=True)
     metadata, segments = result["metadata"], result["segments"]
     stem = str(prefix)
-    Path(stem + ".json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    Path(stem + ".json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     Path(stem + ".srt").write_text(
         "\n\n".join(
             f"{s['id']}\n{timestamp(s['start'], True)} --> {timestamp(s['end'], True)}\n{s['text']}" for s in segments
         )
-        + "\n"
+        + "\n",
+        encoding="utf-8",
     )
     fence = "`" * max(3, 1 + max((len(m.group()) for s in segments for m in re.finditer(r"`+", s["text"])), default=0))
     prompt = (
@@ -311,14 +605,21 @@ def export(result, prefix):
             fence,
             "",
         ]
-    Path(stem + ".md").write_text("\n".join(lines))
+    Path(stem + ".md").write_text("\n".join(lines), encoding="utf-8")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("media", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", type=Path, default=ROOT / "models/mlx-turbo")
+    parser.add_argument("media", type=Path, nargs="?")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--probe", action="store_true", help="Inspect local media using PyAV, without loading a model.")
+    parser.add_argument(
+        "--check-runtime", action="store_true", help="Check the offline speech runtime, without a model."
+    )
+    parser.add_argument("--model", type=Path, default=None)
+    parser.add_argument("--backend", choices=("auto", "mlx", "faster-whisper"), default=None)
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default=None)
+    parser.add_argument("--compute-type", default=None)
     parser.add_argument("--language", default=None)
     parser.add_argument("--start", type=float, default=0.0)
     parser.add_argument("--duration", type=float)
@@ -326,10 +627,28 @@ if __name__ == "__main__":
     parser.add_argument("--title", default="")
     parser.add_argument("--video-id", default="")
     args = parser.parse_args()
+    if args.check_runtime and args.probe:
+        parser.error("choose --probe or --check-runtime")
+    if not args.check_runtime and args.media is None:
+        parser.error("media is required for probing or transcription")
+    if not args.probe and not args.check_runtime and args.output is None:
+        parser.error("--output is required for transcription")
     try:
+        if args.check_runtime:
+            print(
+                json.dumps(check_runtime(backend=args.backend, device=args.device, compute_type=args.compute_type)),
+                flush=True,
+            )
+            raise SystemExit(0)
+        if args.probe:
+            print(json.dumps(probe_media_pyav(args.media)), flush=True)
+            raise SystemExit(0)
         data = transcribe_file(
             args.media,
             model=args.model,
+            backend=args.backend,
+            device=args.device,
+            compute_type=args.compute_type,
             language=args.language,
             start=args.start,
             duration=args.duration,

@@ -297,7 +297,7 @@ def test_speech_flow_respects_opt_out_and_retries_audio_variant(tmp_path, monkey
         lambda current: (
             {
                 "segments": [{"start": 0.125, "duration": 9, "text": "Full speech", "quality_flags": []}],
-                "metadata": {"language": "en"},
+                "metadata": {"language": "en", "provider": "faster-whisper"},
             }
             if current.audio_validated
             else pytest.fail("must check audio")
@@ -313,6 +313,8 @@ def test_speech_flow_respects_opt_out_and_retries_audio_variant(tmp_path, monkey
     assert job.state == "completed" and job.result["source"] == "asr"
     assert downloads == ["https://v.douyinvod.com/720", "https://v.douyinvod.com/4k"]
     assert job.result["duration"] == 10.125
+    assert job.result["provider"] == "faster-whisper"
+    context.close.assert_called_once()  # Release the profile before local inference, without a duplicate close.
 
 
 def mock_browser(monkeypatch, tmp_path, data=None):
@@ -341,6 +343,50 @@ def block_speech_and_media(monkeypatch, manager):
     monkeypatch.setattr(manager, "_speech", lambda *_: pytest.fail("speech recognition must not run"))
     monkeypatch.setattr("app.douyin_service.check_setup", lambda: pytest.fail("speech setup must not run"))
     monkeypatch.setattr("app.douyin_service.probe_video", lambda *_: pytest.fail("media probe must not run"))
+
+
+@pytest.mark.parametrize("failure_stage", ["new_page", "media_guard"])
+def test_browser_initialization_failure_is_not_masked_and_context_is_closed(tmp_path, monkeypatch, failure_stage):
+    from playwright.sync_api import Error as BrowserError
+
+    context, _page = mock_browser(monkeypatch, tmp_path)
+    failure = BrowserError("Target page, context or browser has been closed: https://private.test/?token=secret")
+    if failure_stage == "new_page":
+        context.pages = []
+        context.new_page.side_effect = failure
+    else:
+        guard = MagicMock(side_effect=failure)
+        monkeypatch.setattr("app.douyin_service.install_caption_media_guard", guard)
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, False, tmp_path)
+    manager.job = job
+    manager._run(job)
+    assert job.state == "failed" and job.code == "browser_closed"
+    assert job.blocked_media_requests == 0
+    assert "private.test" not in job.message and "secret" not in job.message
+    context.close.assert_called_once()
+
+
+def test_missing_speech_setup_closes_browser_without_download_or_repeated_login(tmp_path, monkeypatch):
+    data = fixture_video()
+    data["video"]["subtitleInfos"] = []
+    context, _page = mock_browser(monkeypatch, tmp_path, data)
+    setup = MagicMock(side_effect=ExtractionError("speech_setup_required", "Prepare the Windows speech runtime.", 422))
+    monkeypatch.setattr("app.douyin_service.check_setup", setup)
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, True, tmp_path)
+    manager.job = job
+    download = MagicMock()
+    monkeypatch.setattr(manager, "_download", download)
+    monkeypatch.setattr(
+        manager, "_wait", lambda *_: pytest.fail("Public metadata access does not require another login")
+    )
+    manager._run(job)
+    assert job.state == "failed" and job.code == "speech_setup_required"
+    assert job.caption_probe_complete and not job.manual_confirmed
+    assert job.media is None and job.result is None
+    download.assert_not_called()
+    context.close.assert_called_once()
 
 
 def test_selected_language_waits_for_choice_and_reads_only_that_caption(tmp_path, monkeypatch):
@@ -419,6 +465,208 @@ def test_default_captions_only_job_stops_without_any_media_when_no_track_exists(
     assert public["blocked_media_requests"] == 1
     assert page.evaluate.call_count == 1  # Restricted caption metadata refresh.
     context.cookies.assert_not_called()
+
+
+def metadata_without_allowed_media():
+    data = fixture_video()
+    data["video"]["subtitleInfos"] = []
+    data["video"]["bit_rate"] = [{"play_addr": {"url_list": ["https://unsupported-playback.example/video"]}}]
+    return data
+
+
+def mock_local_speech(monkeypatch):
+    monkeypatch.setattr("app.douyin_service.check_setup", lambda: None)
+    monkeypatch.setattr("app.douyin_service.probe_video", lambda _: 10.125)
+    monkeypatch.setattr(
+        "app.douyin_service.transcribe_job",
+        lambda _: {
+            "segments": [{"start": 0.125, "duration": 9, "text": "Complete speech", "quality_flags": []}],
+            "metadata": {"language": "en", "provider": "faster-whisper"},
+        },
+    )
+
+
+def test_explicit_mp4_variants_and_primary_playback_precede_lower_bitrate_dash():
+    data = fixture_video()
+    data["video"].update(
+        {
+            "format": "dash",
+            "play_addr_h264": {"url_list": ["https://v.douyinvod.com/primary-muxed-1080"]},
+            "play_addr": {"url_list": ["https://v.douyinvod.com/primary-muxed-1080"]},
+            "bit_rate": [
+                {
+                    "format": "dash",
+                    "bit_rate": 200,
+                    "play_addr": {
+                        "width": 1280,
+                        "height": 720,
+                        "url_list": [f"https://v.douyinvod.com/silent-dash-mirror-{n}" for n in range(6)],
+                    },
+                },
+                {
+                    "format": "mp4",
+                    "bit_rate": 300,
+                    "play_addr": {
+                        "width": 1280,
+                        "height": 720,
+                        "url_list": ["https://v.douyinvod.com/muxed-720", "http://127.0.0.1/rejected"],
+                    },
+                },
+            ],
+        }
+    )
+    addresses = inspect_video(data)["_media_urls"]
+    assert addresses[:2] == ["https://v.douyinvod.com/muxed-720", "https://v.douyinvod.com/primary-muxed-1080"]
+    assert len(addresses) == len(set(addresses))
+    assert all(safe_media_url(address) for address in addresses)
+
+
+def test_audio_variant_is_tried_before_all_mirrors_of_a_silent_variant_exhaust_budget(tmp_path, monkeypatch):
+    data = fixture_video()
+    data["video"]["subtitleInfos"] = []
+    data["video"]["bit_rate"] = [
+        {
+            "format": "mp4",
+            "bit_rate": 100,
+            "play_addr": {
+                "width": 1280,
+                "height": 720,
+                "url_list": [f"https://v.douyinvod.com/variant-without-audio-{n}" for n in range(6)],
+            },
+        },
+        {
+            "format": "mp4",
+            "bit_rate": 1000,
+            "play_addr": {"width": 1920, "height": 1080, "url_list": ["https://v.douyinvod.com/variant-with-audio"]},
+        },
+    ]
+    context, page = mock_browser(monkeypatch, tmp_path, data)
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, True, tmp_path)
+    manager.job = job
+    mock_local_speech(monkeypatch)
+    downloaded = []
+
+    def download(_job, _context, address, destination, _limit):
+        downloaded.append(address)
+        destination.write_bytes(b"silent" if "without-audio" in address else b"video with narration")
+
+    def probe(path):
+        if path.read_bytes() == b"silent":
+            raise ExtractionError("no_audio", "This variant has no audio stream.", 422)
+        return 10.125
+
+    monkeypatch.setattr(manager, "_download", download)
+    monkeypatch.setattr("app.douyin_service.probe_video", probe)
+    manager._run(job)
+    assert job.state == "completed" and job.result["source"] == "asr"
+    assert downloaded == [
+        "https://v.douyinvod.com/variant-without-audio-0",
+        "https://v.douyinvod.com/variant-with-audio",
+    ]
+    assert job.audio_validated
+    page.wait_for_timeout.assert_not_called()
+    context.close.assert_called_once()
+
+
+def test_speech_waits_for_late_matching_allowed_playback_without_trusting_other_hosts_or_videos(tmp_path, monkeypatch):
+    context, page = mock_browser(monkeypatch, tmp_path, metadata_without_allowed_media())
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, True, tmp_path)
+    manager.job = job
+    mock_local_speech(monkeypatch)
+    other = fixture_video()
+    other["aweme_id"] = "7685972770793999668"
+    valid = fixture_video()
+    valid["video"]["subtitleInfos"] = []
+    delayed = iter([other, metadata_without_allowed_media(), valid])
+
+    def receive_response(_milliseconds):
+        response = MagicMock()
+        response.url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+        response.headers = {"content-type": "application/json"}
+        response.body.return_value = json.dumps({"aweme_detail": next(delayed)}).encode()
+        context.on.call_args.args[1](response)
+
+    page.wait_for_timeout.side_effect = receive_response
+    downloaded = []
+
+    def download(_job, _context, address, destination, _limit):
+        downloaded.append(address)
+        destination.write_bytes(b"validated local media")
+
+    monkeypatch.setattr(manager, "_download", download)
+    manager._run(job)
+    assert job.state == "completed" and job.result["source"] == "asr"
+    assert downloaded == ["https://v.douyinvod.com/720"]
+    assert page.wait_for_timeout.call_count == 3
+    assert all(call.args == (250,) for call in page.wait_for_timeout.call_args_list)
+    assert job.result["video_id"] == VIDEO
+    assert not job.manual_confirmed
+    assert "_media_urls" not in json.dumps(job.public())
+    context.close.assert_called_once()
+
+
+def test_refreshed_incomplete_metadata_keeps_observed_media_in_preferred_order(tmp_path, monkeypatch):
+    initial = fixture_video()
+    initial["video"]["subtitleInfos"] = []
+    context, page = mock_browser(monkeypatch, tmp_path, initial)
+    page.evaluate.return_value = {"status": 200, "text": json.dumps({"aweme_detail": metadata_without_allowed_media()})}
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, True, tmp_path)
+    manager.job = job
+    mock_local_speech(monkeypatch)
+    downloaded = []
+
+    def download(_job, _context, address, destination, _limit):
+        downloaded.append(address)
+        destination.write_bytes(b"validated local media")
+
+    monkeypatch.setattr(manager, "_download", download)
+    manager._run(job)
+    assert job.state == "completed"
+    assert downloaded == ["https://v.douyinvod.com/720"]
+    page.wait_for_timeout.assert_not_called()
+    context.close.assert_called_once()
+
+
+@pytest.mark.parametrize("allow_asr", [False, True])
+def test_missing_allowed_media_wait_is_bounded_and_never_runs_for_captions_only(tmp_path, monkeypatch, allow_asr):
+    context, page = mock_browser(monkeypatch, tmp_path, metadata_without_allowed_media())
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, allow_asr, tmp_path)
+    manager.job = job
+    setup, download, speech = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr("app.douyin_service.check_setup", setup)
+    monkeypatch.setattr(manager, "_download", download)
+    monkeypatch.setattr(manager, "_speech", speech)
+    manager._run(job)
+    assert job.state == "failed"
+    assert job.code == ("media_unavailable" if allow_asr else "captions_not_found")
+    assert page.wait_for_timeout.call_count == (40 if allow_asr else 0)
+    assert setup.call_count == (1 if allow_asr else 0)
+    assert job.caption_probe_complete and not job.audio_validated
+    download.assert_not_called()
+    speech.assert_not_called()
+    context.close.assert_called_once()
+
+
+def test_cancelling_passive_media_wait_prevents_acquisition_and_cleans_browser(tmp_path, monkeypatch):
+    context, page = mock_browser(monkeypatch, tmp_path, metadata_without_allowed_media())
+    manager = DouyinManager()
+    job = Job("id", URL, VIDEO, True, tmp_path)
+    manager.job = job
+    monkeypatch.setattr("app.douyin_service.check_setup", lambda: None)
+    page.wait_for_timeout.side_effect = lambda _: manager.cancel(job.id)
+    download, speech = MagicMock(), MagicMock()
+    monkeypatch.setattr(manager, "_download", download)
+    monkeypatch.setattr(manager, "_speech", speech)
+    manager._run(job)
+    assert job.state == "cancelled" and job.code == "cancelled"
+    assert page.wait_for_timeout.call_count == 1
+    download.assert_not_called()
+    speech.assert_not_called()
+    context.close.assert_called_once()
 
 
 def test_active_page_metadata_refresh_recovers_missing_passive_response(tmp_path, monkeypatch):

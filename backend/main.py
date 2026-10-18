@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import platform
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.douyin_service import manager
+from app.speech_runtime import speech_capabilities
 from app.transcript_service import ExtractionError, fetch_selected, get_video_info
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,6 +81,12 @@ def timestamp(seconds: float) -> str:
 @app.get("/health")
 def health():
     return {"status": "healthy", "mode": "captions-and-optional-local-speech"}
+
+
+@app.get("/api/capabilities")
+def capabilities():
+    """Optional runtime readiness without loading the speech model or media."""
+    return {"platform": platform.system().lower(), "speech": speech_capabilities()}
 
 
 def public_job(job, request: Request):
@@ -192,4 +200,5 @@ else:
 
     @app.get("/")
     def setup_needed():
-        return JSONResponse({"message": "Run ./setup.sh to build the web interface."}, status_code=503)
+        command = r".\setup.cmd" if platform.system() == "Windows" else "./setup.sh"
+        return JSONResponse({"message": f"Run {command} to build the web interface."}, status_code=503)

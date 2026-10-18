@@ -8,7 +8,7 @@ Retrieve existing YouTube or Douyin captions, bring a timestamped transcript to 
 
 ![The YouTube channel in the local app, with its own caption-only form and a separate Douyin tab](docs/screenshots/youtube-channel.jpg)
 
-Built on [samueladegoke/yt-transcript-web](https://github.com/samueladegoke/yt-transcript-web), with its MIT license preserved. Runs locally on your Mac; analysis happens in your own AI chat.
+Built on [samueladegoke/yt-transcript-web](https://github.com/samueladegoke/yt-transcript-web), with its MIT license preserved. Runs locally on macOS or Windows; analysis happens in your own AI chat.
 
 ## Purpose and workflow
 
@@ -25,7 +25,7 @@ You choose when and where to submit the transcript. The app makes no AI-service 
 | Channel | What happens after you paste a link |
 | --- | --- |
 | **YouTube** | Check existing caption tracks, choose the language when needed, and retrieve the transcript. No separate browser window or speech model is used. |
-| **Douyin** | Open the official page in a dedicated local browser. Complete any requested login or verification, then click **I’ve verified, continue**. The app checks timed captions while blocking player media. Choose a track when several are exposed. A working saved session proceeds automatically. |
+| **Douyin** | Open the official page in a dedicated local browser. Complete any requested check when extraction pauses, then click **I’ve verified, continue**. The app checks timed captions while blocking player media. Public metadata can be accessible without login; choose a track when several are exposed. |
 
 Each channel keeps its own link, transcript, selected language, search, and errors while the page stays open. Switching to YouTube leaves an active Douyin job running. The Douyin tab shows **Needs verification**, **Extracting**, or **Ready**, so you can see when to return. Pasting a link into the wrong channel shows a message before any extraction request is sent.
 
@@ -92,7 +92,9 @@ See the [Roadmap](ROADMAP.md) for scope, proposed interfaces, and contribution p
 
 ## Quick start
 
-The launcher is designed for macOS. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Node.js 22.12+ with npm, then run:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Node.js 22.12+ with npm. The setup scripts create isolated Python environments and build the web interface. Existing captions need no speech model.
+
+**macOS:**
 
 ```bash
 git clone https://github.com/Jack-Li-Npu/video-content-extractor.git
@@ -102,6 +104,17 @@ cd video-content-extractor
 ```
 
 Open **http://127.0.0.1:8000**. Keep the terminal open while using the app; press Control-C to stop it. On subsequent macOS runs, you can double-click `start.command` in Finder.
+
+**Windows x64**, from PowerShell in your chosen project folder:
+
+```powershell
+git clone https://github.com/Jack-Li-Npu/video-content-extractor.git
+cd video-content-extractor
+.\setup.cmd
+.\Start-Video-Content-Extractor.cmd
+```
+
+The Start shortcut opens the browser and keeps the server in the background. Use `Stop-Video-Content-Extractor.cmd` to stop this installation. It does not install a Windows service or enable automatic sign-in startup. See the [Windows guide](docs/WINDOWS.md) for speech setup, proxies, logs, and troubleshooting.
 
 ### Use Douyin captions without a speech model
 
@@ -114,20 +127,29 @@ This mode does not download audio/video or speech models. It preserves caption t
 
 ### Enable the optional Douyin speech fallback once
 
-Existing YouTube captions need no speech model. To generate speech captions for Douyin videos without an exposed caption track, use an **Apple Silicon Mac**, install FFmpeg, and run the optional setup from the project folder:
+Existing YouTube captions need no speech model. For Douyin videos without an exposed timed track, install the optional local speech runtime for your platform:
+
+| Platform | Setup | Inference |
+| --- | --- | --- |
+| Apple Silicon Mac | Install FFmpeg, then run `./setup-douyin.sh` | Existing MLX Whisper backend |
+| Windows x64 | Run `.\setup-douyin.cmd` | faster-whisper/CTranslate2 on NVIDIA CUDA or CPU; PyAV handles media without a system FFmpeg installation |
+
+Apple Silicon setup:
 
 ```bash
 brew install ffmpeg
 ./setup-douyin.sh
 ```
 
-The script uses uv to create a separate Python 3.12 environment and downloads about **1.6 GB of pinned model weights**, with additional space needed for dependencies. Inference then runs locally. If the server is already running, stop it with Control-C and launch `./start.command` again. Intel Macs, Windows, and Linux do not currently have a supported local speech backend.
+Both setups use isolated dependencies and pinned Whisper large-v3-turbo model files checked by size and SHA-256. Model weights need about **1.6 GB**, plus dependencies and temporary media. Windows uses the pinned [dropbox-dash CTranslate2 conversion](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo); its `model.bin` is approximately **1.618 GB**. Windows `-Device auto` installs the CUDA extra only when a responding NVIDIA GPU/driver is detected; those runtime wheels add about **1.3 GB**, plus dependencies. `-Device cpu` avoids CUDA dependencies; explicit `-Device cuda` requires a working NVIDIA driver. See [Windows setup](docs/WINDOWS.md) for Visual C++ requirements and switching devices.
+
+Restart the server after setup and reload the page. `/health` confirms that the app is running; `/api/capabilities` separately checks speech runtime imports, device/precision support, required model-file presence, and relevant runtime libraries. It does not load the model or guarantee enough GPU memory for inference. Intel Mac/Linux speech installation is not covered by the supplied setup guides.
 
 To opt in to speech recognition:
 
 1. Open the **Douyin** tab and enable **Allow video download for local speech recognition** before starting or retrying extraction.
 2. Click **Extract transcript**. Keep the dedicated browser open. If asked, complete Douyin's login, CAPTCHA, or identity verification yourself there; the extractor does not collect identity documents or solve challenges.
-3. Return to the extractor and click **I’ve verified, continue** when it asks. The remaining steps run automatically. If a saved session already works, this confirmation is skipped.
+3. Return to the extractor and click **I’ve verified, continue** when it asks. The remaining steps run automatically. Public video metadata can be readable without login, so an automatic continuation does not prove authentication. The dedicated browser closes when caption checking, media acquisition, or a failure ends its work; speech runs afterward without that window.
 4. If no caption track is exposed, the app downloads a temporary video with audio and runs local speech recognition. When **Ready for Codex** appears, search the text, inspect the local video at a timestamp, or copy/download the complete handoff. Check speech-recognition warnings before relying on names or numbers. If existing captions were retrieved instead, no local video is created.
 
 Keep the server running while Codex uses local video links. Starting another Douyin extraction or stopping the server removes the previous local video; downloaded transcript files remain on your computer. For retry behavior, configuration paths, and access failures, see the [Douyin guide](docs/DOUYIN.md).
@@ -148,7 +170,7 @@ The repository was renamed from `youtube-content-extractor` to `video-content-ex
 git remote set-url origin https://github.com/Jack-Li-Npu/video-content-extractor.git
 ```
 
-If you enable or update the optional speech runtime, run `./setup-douyin.sh` before launching. Matching model files are verified and reused instead of downloaded again. Setup preserves your existing `.env`; compare `.env.example` for new optional settings.
+On Windows, stop the app, run `git pull --ff-only`, then `.\setup.cmd` and `.\Start-Video-Content-Extractor.cmd` from PowerShell instead. If you enable or update the optional speech runtime, run the corresponding `setup-douyin.sh` or `setup-douyin.cmd` before launching. Matching model files are verified and reused. Windows downloads preserve resumable partials when possible and reject checksum mismatches. Setup preserves existing `.env` keys; compare `.env.example` for new settings. Changing `-Device` installs different dependencies but does not overwrite an existing `STT_DEVICE`; edit that key when switching a configured installation.
 
 <details>
 <summary>Setup details and download troubleshooting</summary>
@@ -171,9 +193,11 @@ The default example configuration does not force a local proxy. If your network 
 YT_PROXY=http://127.0.0.1:7890
 ```
 
-Use your own proxy address and keep that proxy running. Restart the app after changes. `YT_PROXY` takes priority over `HTTPS_PROXY`, `HTTP_PROXY`, and `SOCKS5_PROXY`. For direct access, leave `YT_PROXY` empty and unset those other variables. Existing shell environment variables override `.env`.
+Use your own proxy address and keep that proxy running. Restart the app after changes. `YT_PROXY` takes priority over `HTTPS_PROXY`, `HTTP_PROXY`, and `SOCKS5_PROXY`. For direct access, leave `YT_PROXY` empty and unset those other variables. Direct Python/macOS dotenv loading preserves existing shell variables. The Windows Start launcher explicitly loads documented `.env` values into its child process, so those file values take priority for that launch; it restores the calling shell afterward.
 
-This setting covers backend YouTube requests. If npm or uv also needs a proxy, set `HTTPS_PROXY` in the terminal before running setup. YouTube extraction does not read browser cookies. Douyin uses its own dedicated browser profile; this proxy setting does not configure that browser or its media downloads.
+This setting covers backend YouTube requests. Windows setup also reads a literal `YT_PROXY` from `.env` before installing dependencies and models, filling only unset shell proxy values; `-Proxy` explicitly overrides them for that setup run. You can also set `HTTPS_PROXY` before setup. YouTube extraction does not read browser cookies. Douyin uses its own dedicated browser profile; these settings do not configure that browser or its media downloader.
+
+Windows installer/model downloads require an HTTP(S) proxy endpoint. YouTube extraction also supports SOCKS through its Requests backend; for setup, use the proxy application's HTTP or mixed port instead of a `socks5://` URL.
 
 ## Use the video-brief skill
 
@@ -209,7 +233,7 @@ YouTube exports use `youtube-transcript/v1`; Douyin exports use `video-transcrip
 ```text
 backend/                 FastAPI API, YouTube retrieval, Douyin jobs and speech worker
 frontend/                React interface, Markdown export, locked npm dependencies
-stt/                     Optional Apple Silicon speech environment and model setup
+stt/                     Optional Apple Silicon and Windows speech runtimes/model setup
 skills/video-brief/       Portable analysis instructions for a separate AI assistant
 scripts/                 Export verification utility
 docs/ARCHITECTURE.md      Current boundaries and proposed extension points
@@ -221,7 +245,8 @@ ROADMAP.md               Platform and browser-extension plans
 - `POST /api/video-info` with `{"url":"https://www.youtube.com/watch?v=Hrbq66XqtCo"}` returns metadata, available tracks, and a recommended track ID.
 - `POST /api/extract` with `{"url":"Hrbq66XqtCo","track_id":"uploaded:en"}` retrieves the chosen track. Use a track ID returned by video-info.
 - `POST /api/douyin/jobs` starts a single-link browser job; status, manual confirmation, cancellation and local playback routes are described in [docs/DOUYIN.md](docs/DOUYIN.md).
-- `GET /health` reports the service status and optional local speech mode.
+- `GET /health` reports service health; its mode label does not mean speech is installed.
+- `GET /api/capabilities` reports the configured speech backend and runtime readiness without loading its model or downloading media.
 
 Transcript records include `text`, fractional `start` and `duration`, plus display `timestamp` and legacy `seconds`. The response also identifies language, source, provider, and track. Extraction failures are explicit rather than being hidden behind successful metadata retrieval.
 
@@ -235,7 +260,7 @@ The YouTube path retrieves existing captions only and does not download media or
 
 YouTube supports accessible public videos with existing captions. Douyin is limited to individual videos whose normal browser playback exposes usable metadata; manual login or verification may still not resolve platform restrictions. Private, removed, restricted, sign-in-required, or captionless videos may fail. Errors distinguish invalid links, unavailable videos, missing or empty captions, blocked requests, and connection failures. YouTube can change caption access; the app does not bypass authentication or access restrictions.
 
-The server binds to `127.0.0.1` and checks local hosts/origins. It is intended for personal local use, not public hosting. YouTube metadata and signed caption URLs are cached in process memory for up to five minutes, with a maximum of eight videos. YouTube transcript results stay in browser memory until copied, downloaded, replaced, or the page is closed. Thumbnails are loaded from YouTube. No transcript library or automatic upload is maintained. Douyin keeps the current job and caption result in server memory until replaced or normal shutdown. Optional speech keeps acquired media locally for playback and retry; cancelled jobs and failures without validated audio are cleared. Page reload restores the current Douyin job while the server stays running. Its dedicated login profile persists outside the repository. A forced crash can leave temporary files; see the Douyin guide for cleanup.
+The server binds to `127.0.0.1` and checks local hosts/origins. It is intended for personal local use, not public hosting. YouTube metadata and signed caption URLs are cached in process memory for up to five minutes, with a maximum of eight videos. YouTube transcript results stay in browser memory until copied, downloaded, replaced, or the page is closed. Thumbnails are loaded from YouTube. No transcript library or automatic upload is maintained. Douyin keeps the current job and caption result in server memory until replaced or normal shutdown. Optional speech keeps acquired media locally for playback and retry; cancelled jobs and failures without validated audio are cleared. Page reload restores the current Douyin job while the server stays running. Its dedicated login profile persists separately from jobs, under the user's home directory by default or an explicitly configured location. A forced crash can leave temporary files; see the Douyin guide for cleanup.
 
 Captions may contain mistakes, omit visuals, or leave gaps. Follow timestamp links to check the original context before relying on an important claim. Users remain responsible for how they use and share source material.
 
@@ -248,11 +273,13 @@ After setup, run these checks from the repository root:
 
 ```bash
 backend/.venv/bin/python -m pytest -q
-backend/.venv/bin/ruff check backend/main.py backend/app backend/workers backend/tests tests stt/download_model.py
+backend/.venv/bin/ruff check backend/main.py backend/app backend/workers backend/tests tests stt/download_model.py stt/download_windows_model.py
 npm test --prefix frontend
 npm run lint --prefix frontend
 npm run build --prefix frontend
 ```
+
+On Windows, use `backend/.venv/Scripts/python.exe -m pytest -q` and `backend/.venv/Scripts/ruff.exe check backend/main.py backend/app backend/workers backend/tests tests stt/download_model.py stt/download_windows_model.py`; the npm commands are the same. See [Windows validation](docs/WINDOWS.md#validation-and-readiness) for offline and live-test boundaries.
 
 For frontend development, keep the backend running and run `npm run dev --prefix frontend -- --host 127.0.0.1`. Vite forwards local API calls to port 8000. Production uses the same origin as FastAPI.
 
@@ -269,7 +296,7 @@ Contributions are welcome, particularly caption-provider adapters, player seekin
 - **Metadata and caption fallback:** [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp), used with media downloads disabled.
 - **Douyin browser workflow:** [Playwright](https://github.com/microsoft/playwright-python), independently implemented with an official-page browser, restricted metadata refresh, and caption-only requests. Public [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) documentation and local architectural study of Douzy informed the persistent-browser, narrow-operation and worker-state design. Douzy is not a dependency; no proprietary Douzy source or assets are included.
 - **Douyin caption formats:** The public [yt-dlp TikTok/Douyin extractor](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/tiktok.py) documents the explicit caption fields and millisecond `utterances` format used as references for our independent discovery/parser. Supported schemas do not imply every Douyin video exposes a track. See [acquisition boundaries](docs/DOUYIN.md#acquisition-boundaries).
-- **Optional local speech:** [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), [MLX](https://github.com/ml-explore/mlx), the [Whisper large-v3-turbo model conversion](https://huggingface.co/mlx-community/whisper-large-v3-turbo), and separately installed [FFmpeg](https://ffmpeg.org/).
+- **Optional local speech:** [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) / [MLX](https://github.com/ml-explore/mlx) on Apple Silicon; [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [CTranslate2](https://github.com/OpenNMT/CTranslate2), and [PyAV](https://github.com/PyAV-Org/PyAV) on Windows. Model conversions and optional NVIDIA runtime notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - **Frontend design guidance:** [Leonxlnx/taste-skill](https://github.com/Leonxlnx/taste-skill), especially its existing-project redesign workflow.
 - **Implementation stack:** React, Vite, Tailwind CSS, FastAPI, Uvicorn, Lucide icons, and self-hosted Geist fonts. Source links and license notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
