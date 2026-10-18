@@ -146,7 +146,9 @@ class CrossPlatformSpeech(unittest.TestCase):
             files = ("config.json", "weights.npz")
         for name in files:
             (model / name).write_bytes(b"synthetic fixture")
-        return model
+        # Production canonicalizes local model paths. Temp roots can be aliases
+        # (/var on macOS or RUNNER~1 on Windows), so compare canonical fixtures.
+        return model.resolve()
 
     @staticmethod
     def decoded_audio(command, **kwargs):
