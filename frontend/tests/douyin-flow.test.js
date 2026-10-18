@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_DOUYIN_ALLOW_ASR, isRunning, primaryAction, progressSteps } from '../src/lib/douyin-flow.js';
+import { DEFAULT_DOUYIN_ALLOW_ASR, failureGuidance, isRunning, primaryAction, progressSteps, speechSetupGuidance } from '../src/lib/douyin-flow.js';
 
 test('Douyin starts in captions-only mode without consenting to a video download', () => {
   assert.equal(DEFAULT_DOUYIN_ALLOW_ASR, false);
@@ -71,4 +71,27 @@ test('missing speech setup after caption discovery does not claim a media downlo
   assert.equal(steps[2].label, 'Prepare local speech setup');
   assert.equal(steps[2].current, true);
   assert.equal(steps[2].done, false);
+});
+
+test('speech setup instructions follow the server platform without enabling a download', () => {
+  const windows = speechSetupGuidance({ platform: 'windows', speech: {
+    available: false, message: 'Install the local Windows runtime.', setup_hint: 'Run setup-douyin.ps1',
+  } });
+  assert.equal(windows.available, false);
+  assert.equal(windows.setupHint, 'Run setup-douyin.ps1');
+  assert.doesNotMatch(windows.message, /Apple|Mac/);
+  const ready = speechSetupGuidance({ speech: { available: true, message: 'Local speech is ready.' } });
+  assert.equal(ready.available, true);
+  assert.equal(DEFAULT_DOUYIN_ALLOW_ASR, false);
+  assert.match(speechSetupGuidance(null).setupHint, /Windows.*Apple Silicon/);
+});
+
+test('missing captions and missing speech setup explain browser closure without implying login failure', () => {
+  assert.match(failureGuidance({ code: 'captions_not_found' }), /not a login error/);
+  for (const code of ['speech_setup_required', 'speech_runtime_missing', 'model_missing']) {
+    const explanation = failureGuidance({ code });
+    assert.match(explanation, /setup is incomplete/);
+    assert.match(explanation, /does not mean login failed/);
+  }
+  assert.match(failureGuidance({ can_retry_speech: true, code: 'model_missing' }), /no new login or download/);
 });

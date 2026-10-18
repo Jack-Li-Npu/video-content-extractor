@@ -10,7 +10,7 @@ The published repository starts with a clean snapshot of the adapted application
 
 ## Main technologies
 
-Dependencies retain their own licenses. Exact installed versions and transitive dependencies are recorded in `backend/uv.lock` and `frontend/package-lock.json`; this table identifies the principal source projects rather than replacing their license files.
+Dependencies retain their own licenses. Exact installed versions and transitive dependencies are recorded in `backend/uv.lock`, `frontend/package-lock.json`, `stt/uv.lock`, and `stt/windows/uv.lock`; this table identifies the principal source projects rather than replacing their license files.
 
 | Technology | Role | Public source |
 | --- | --- | --- |
@@ -28,8 +28,13 @@ Dependencies retain their own licenses. Exact installed versions and transitive 
 | uv | Isolated Python environment and locked installation | [astral-sh/uv](https://github.com/astral-sh/uv) |
 | Playwright | Dedicated headed browser and normal Douyin playback response observation | [microsoft/playwright-python](https://github.com/microsoft/playwright-python) (Apache-2.0) |
 | MLX Whisper / MLX | Optional offline speech recognition on Apple Silicon; locked separately in `stt/uv.lock` | [ml-explore/mlx-examples/whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper), [ml-explore/mlx](https://github.com/ml-explore/mlx) (MIT) |
-| Whisper large-v3-turbo | Optional speech model, installed separately with pinned revision and checksums | [openai/whisper](https://github.com/openai/whisper), [MLX model conversion](https://huggingface.co/mlx-community/whisper-large-v3-turbo) (MIT) |
-| FFmpeg / FFprobe | Local audio decoding; installed separately | [FFmpeg](https://ffmpeg.org/legal.html) (license depends on the user's build) |
+| faster-whisper / CTranslate2 | Optional Windows local speech backend, with CPU and NVIDIA inference; locked separately in `stt/windows/uv.lock` | [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper), [OpenNMT/CTranslate2](https://github.com/OpenNMT/CTranslate2) |
+| PyAV | Windows media probing/audio decoding through packaged FFmpeg libraries, without a system FFmpeg executable | [PyAV-Org/PyAV](https://github.com/PyAV-Org/PyAV); packaged FFmpeg libraries retain their own notices |
+| Whisper large-v3-turbo | Optional model, installed separately with pinned revision, sizes, and SHA-256 checksums | [openai/whisper](https://github.com/openai/whisper), [MLX conversion](https://huggingface.co/mlx-community/whisper-large-v3-turbo), [dropbox-dash CTranslate2 conversion](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo) |
+| NVIDIA cuBLAS / cuDNN runtime wheels | Optional CUDA extra for Windows faster-whisper; downloaded separately, with NVIDIA license terms rather than the app's MIT license | [cuBLAS](https://developer.nvidia.com/cublas), [cuDNN](https://developer.nvidia.com/cudnn) |
+| FFmpeg / FFprobe | Apple Silicon media decoding/probing; installed separately | [FFmpeg](https://ffmpeg.org/legal.html) (license depends on the user's build) |
+
+The Windows model conversion is pinned to `dropbox-dash/faster-whisper-large-v3-turbo` revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`. The downloader records expected sizes and SHA-256 checksums in `stt/download_windows_model.py`; setup fetches those model files rather than bundling them in Git. macOS keeps its separate MLX conversion and downloader. Installing the optional CUDA extra installs NVIDIA runtime wheels; users must observe their included licenses and notices.
 
 The public [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) documentation informed the browser-acquisition approach. Its desktop browser bridge and Douzy code are not bundled, and Douzy is not a runtime dependency. The app's Douyin adapter is independently implemented.
 

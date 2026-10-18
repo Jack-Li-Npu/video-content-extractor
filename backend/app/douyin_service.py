@@ -14,13 +14,20 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 import requests
 from playwright.sync_api import Error as BrowserError
 
-from .douyin_browser import install_caption_media_guard, read_caption_text, refresh_video_metadata
+from .douyin_browser import (
+    browser_channel,
+    browser_failure,
+    install_caption_media_guard,
+    read_caption_text,
+    refresh_video_metadata,
+)
 from .douyin_captions import caption_records, discover_caption_tracks
 from .speech_service import check_setup, probe_video, transcribe_job
 from .transcript_service import ExtractionError
@@ -119,14 +126,28 @@ def inspect_video(data):
     for entry in video.get("bit_rate") or []:
         address = entry.get("play_addr") or {}
         if address.get("url_list"):
-            # Prefer a moderate resolution for speech extraction; retain the
-            # returned URLs rather than constructing private playback endpoints.
+            # DASH tracks can be video-only even when packaged in an MP4
+            # container. Prefer explicit progressive variants before sorting
+            # for moderate resolution/bitrate within each format class.
             edge = min(address.get("width") or 9999, address.get("height") or 9999)
-            candidates.append((abs(edge - 720), entry.get("bit_rate") or 0, address))
-    addresses = [row[2] for row in sorted(candidates, key=lambda row: row[:2])]
-    addresses += [video.get("play_addr_h264") or {}, video.get("play_addr") or {}]
+            format_name = str(entry.get("format") or "").lower()
+            rank = 0 if format_name == "mp4" else 2 if format_name == "dash" else 1
+            candidates.append((rank, abs(edge - 720), entry.get("bit_rate") or 0, address))
+    candidates.sort(key=lambda row: row[:3])
+    progressive = [row[3] for row in candidates if row[0] == 0]
+    # Keep the primary playback variants early if smaller tracks lack audio.
+    addresses = progressive[:1] + [video.get("play_addr_h264") or {}, video.get("play_addr") or {}]
+    addresses += progressive[1:] + [row[3] for row in candidates if row[0] != 0]
+    groups = list(
+        dict.fromkeys(
+            tuple(url for url in address.get("url_list", []) if safe_media_url(url)) for address in addresses
+        )
+    )
+    # Try one mirror of each variant before a second mirror of any variant.
+    # Otherwise the five-attempt budget can retry one silent DASH track five
+    # times without ever reaching a returned variant with narration.
     urls = list(
-        dict.fromkeys(url for address in addresses for url in address.get("url_list", []) if safe_media_url(url))
+        dict.fromkeys(url for mirrors in zip_longest(*groups) for url in mirrors if url is not None)
     )
     tracks = discover_caption_tracks(data, safe_caption_url)
     duration = float(video.get("duration") or data.get("duration") or 0) / 1000
@@ -150,7 +171,7 @@ class Job:
     allow_asr: bool
     directory: Path
     state: str = "opening_browser"
-    message: str = "Opening Douyin for manual verification…"
+    message: str = "Opening Douyin to check this video's captions…"
     video: dict | None = None
     result: dict | None = None
     media: Path | None = None
@@ -352,7 +373,10 @@ class DouyinManager:
             }
             for cue in recognized["segments"]
         ]
-        self._complete(job, lines, "asr", "mlx-whisper", recognized["metadata"]["language"], "asr:original")
+        metadata = recognized["metadata"]
+        self._complete(
+            job, lines, "asr", metadata.get("provider", "local-whisper"), metadata["language"], "asr:original"
+        )
 
     def _fail(self, job, exc):
         with self.lock:
@@ -469,15 +493,17 @@ class DouyinManager:
                 )
                 profile.mkdir(parents=True, exist_ok=True)
                 os.chmod(profile, 0o700)
-                channel = "chrome" if Path("/Applications/Google Chrome.app").is_dir() else None
                 context = playwright.chromium.launch_persistent_context(
-                    str(profile), headless=False, channel=channel, service_workers="block"
+                    str(profile), headless=False, channel=browser_channel(), service_workers="block"
                 )
+                media_guard = {"blocked_media_requests": 0}
+                context_closed = False
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
                     captured = []
                     caption_urls = set()
                     media_urls = set()
+                    observed_media_urls = []
                     media_guard = install_caption_media_guard(context, caption_urls, media_urls)
 
                     def retain(match):
@@ -487,7 +513,10 @@ class DouyinManager:
                             for track in discover_caption_tracks(match, safe_caption_url)
                             if "_url" in track
                         )
-                        media_urls.update(inspect_video(match)["_media_urls"])
+                        for address in inspect_video(match)["_media_urls"]:
+                            if address not in media_urls:
+                                observed_media_urls.append(address)
+                                media_urls.add(address)
 
                     def observe(response):
                         address = urlsplit(response.url)
@@ -518,7 +547,7 @@ class DouyinManager:
                     page.goto(job.url, wait_until="domcontentloaded", timeout=60000)
                     if not job.identity:
                         job.url, job.identity = normalize_url(page.url)
-                    job.state, job.message = "reading_video", "Checking this video in your existing Douyin session…"
+                    job.state, job.message = "reading_video", "Checking available playback data for this video…"
                     self._read_metadata(job, page, captured, retain)
                     if not captured:
                         job.state = "waiting_verification"
@@ -587,10 +616,12 @@ class DouyinManager:
                             )
                         check_setup()
                         job.state = "downloading_media"
+                        job.message = "Waiting briefly for this video's normal playback metadata…"
+                        addresses = self._wait_for_media_urls(job, page, observed_media_urls)
                         job.message = "Downloading the source for local speech recognition…"
                         job.media = job.directory / "source.mp4"
                         last_error = None
-                        for address in job.video["_media_urls"][:5]:
+                        for address in addresses[:5]:
                             try:
                                 self._download(job, context, address, job.media, 1024 * 1024 * 1024)
                                 duration = probe_video(job.media)
@@ -612,18 +643,23 @@ class DouyinManager:
                             )
                         job.blocked_media_requests = media_guard["blocked_media_requests"]
                         context.close()
+                        context_closed = True
                         self._speech(job)
                     job.blocked_media_requests = media_guard["blocked_media_requests"]
                     if selected:
                         self._complete(job, lines, source, provider, language, track_id)
                 finally:
                     job.blocked_media_requests = media_guard["blocked_media_requests"]
-                    try:
-                        context.close()
-                    except BrowserError:
-                        pass
+                    if not context_closed:
+                        try:
+                            context.close()
+                        except BrowserError:
+                            pass
         except ExtractionError as exc:
             self._fail(job, exc)
+        except BrowserError as exc:
+            LOG.warning("Douyin browser failed (%s)", type(exc).__name__)
+            self._fail(job, browser_failure(exc))
         except Exception as exc:  # noqa: BLE001 -- worker boundary: never expose URLs or browser secrets in errors
             LOG.warning("Douyin browser worker failed (%s)", type(exc).__name__)
             self._fail(
@@ -634,6 +670,24 @@ class DouyinManager:
                     422,
                 ),
             )
+
+    def _wait_for_media_urls(self, job, page, observed_media_urls):
+        """Allow late matching playback responses, with no new requests or host exemptions."""
+        for attempt in range(41):
+            self._check_cancelled(job)
+            addresses = list(
+                dict.fromkeys(
+                    address for address in [*job.video["_media_urls"], *observed_media_urls] if safe_media_url(address)
+                )
+            )
+            if addresses:
+                return addresses
+            if attempt < 40:
+                # Playwright dispatches its ordinary response callbacks while
+                # waiting. Hydration/refresh data can arrive before playback
+                # variants; only retain() for this exact video supplies URLs.
+                page.wait_for_timeout(250)
+        return []
 
     def _read_metadata(self, job, page, captured, retain):
         """Observe matching JSON/hydration, with a restricted page-context refresh."""

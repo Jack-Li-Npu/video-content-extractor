@@ -33,6 +33,7 @@ def test_worker_errors_are_actionable_without_leaking_private_log(tmp_path):
     ],
 )
 def test_audio_probe_rejects_silent_video_variants_before_model_work(info, code, monkeypatch):
+    monkeypatch.setattr("app.speech_service.selected_backend", lambda: "mlx")
     result = MagicMock(returncode=0, stdout=json.dumps(info))
     monkeypatch.setattr("app.speech_service.shutil.which", lambda *args, **kwargs: "/ffprobe")
     monkeypatch.setattr("app.speech_service.subprocess.run", lambda *args, **kwargs: result)
@@ -100,12 +101,14 @@ def test_preflight_uses_virtual_environment_path_and_detects_missing_mlx(tmp_pat
     (model / "weights.npz").touch()
     monkeypatch.setenv("STT_PYTHON", str(python))
     monkeypatch.setenv("STT_MODEL_DIR", str(model))
+    monkeypatch.setenv("STT_BACKEND", "mlx")
     monkeypatch.setattr("app.speech_service.shutil.which", lambda *args, **kwargs: "/ffmpeg")
-    run = MagicMock(return_value=MagicMock(returncode=1))
+    run = MagicMock(return_value=MagicMock(returncode=1, stdout=json.dumps({"error": "speech_runtime_missing"})))
     monkeypatch.setattr("app.speech_service.subprocess.run", run)
     with pytest.raises(ExtractionError) as failure:
         check_setup()
     assert failure.value.code == "speech_runtime_missing"
     assert run.call_args[0][0][0] == str(python)
     run.return_value.returncode = 0
+    run.return_value.stdout = json.dumps({"backend": "mlx", "device": "gpu", "compute_type": "model_default"})
     assert check_setup() == (python, model)

@@ -6,16 +6,58 @@ permissions:
   contents: read
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    # Synthetic tests only. This matrix does not claim live platform or GPU validation.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.9.24"
       - run: uv sync --project backend --frozen --python 3.13
-      - run: backend/.venv/bin/python -m pytest -q
-      - run: backend/.venv/bin/ruff check backend/main.py backend/app backend/workers backend/tests tests stt/download_model.py
-      - run: bash -n setup.sh setup-douyin.sh start.command
+      - run: uv run --project backend --frozen python -m pytest -q
+      - run: uv run --project backend --frozen ruff check backend/main.py backend/app backend/workers backend/tests tests stt/download_model.py stt/download_windows_model.py
+      - name: Check separate Windows speech lock without installing speech or CUDA
+        run: uv lock --project stt/windows --check --offline
+      - name: Windows CPU speech runtime and decoder smoke (no model or CUDA download)
+        if: runner.os == 'Windows'
+        run: |
+          uv sync --project stt/windows --frozen --python 3.13
+          uv run --project stt/windows --frozen python backend/workers/local_subtitles.py --check-runtime --backend faster-whisper --device cpu --compute-type auto
+      - name: Check Unix launch script syntax
+        if: runner.os != 'Windows'
+        run: bash -n setup.sh setup-douyin.sh start.command
+      - name: Parse Windows setup and launch scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $scripts = @('setup.ps1', 'setup-douyin.ps1', 'Start-Video-Content-Extractor.ps1', 'Stop-Video-Content-Extractor.ps1')
+          foreach ($script in $scripts) {
+            $parseTokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $script), [ref]$parseTokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          }
+      - name: Check Windows launcher portability
+        shell: bash
+        run: |
+          uv run --project backend --frozen python - <<'PY'
+          import pathlib
+          import re
+          files = [
+              'setup.ps1', 'setup.cmd', 'setup-douyin.ps1', 'setup-douyin.cmd',
+              'Start-Video-Content-Extractor.ps1', 'Start-Video-Content-Extractor.cmd',
+              'Stop-Video-Content-Extractor.ps1', 'Stop-Video-Content-Extractor.cmd',
+              'stt/windows/pyproject.toml', 'stt/windows/uv.lock', 'stt/download_windows_model.py',
+          ]
+          forbidden = re.compile(r'(?i)(?:[a-z]:[\\/](?:users[\\/]|freevideo)|(?:127\.0\.0\.1|localhost):7890)')
+          for filename in files:
+              text = pathlib.Path(filename).read_text(encoding='utf-8-sig')
+              assert not forbidden.search(text), f'Nonportable local path or proxy in {filename}'
+          PY
   frontend:
     runs-on: ubuntu-latest
     defaults:

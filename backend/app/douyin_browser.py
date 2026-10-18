@@ -5,7 +5,10 @@ not generate signatures, export cookies, solve checks, or proxy arbitrary reques
 """
 
 import json
+import os
 import re
+import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as BrowserError
@@ -15,6 +18,67 @@ from .transcript_service import ExtractionError
 METADATA_LIMIT = 8 * 1024 * 1024
 CAPTION_LIMIT = 10 * 1024 * 1024
 OFFICIAL_HOSTS = {"www.douyin.com", "douyin.com"}
+
+
+def browser_channel():
+    """Choose a browser without using or inspecting a personal browser profile."""
+    configured = os.environ.get("DOUYIN_BROWSER_CHANNEL", "auto").strip().lower()
+    if configured not in {"auto", "chrome", "chromium", "msedge"}:
+        raise ExtractionError(
+            "browser_setup_required",
+            "Set DOUYIN_BROWSER_CHANNEL to auto, chrome, chromium, or msedge, then restart the extractor.",
+            422,
+        )
+    if configured != "auto":
+        return None if configured == "chromium" else configured
+    if sys.platform == "darwin" and Path("/Applications/Google Chrome.app").is_dir():
+        return "chrome"
+    if sys.platform == "win32":
+        for name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            location = os.environ.get(name)
+            if location and (Path(location) / "Google/Chrome/Application/chrome.exe").is_file():
+                return "chrome"
+    # Playwright's installed Chromium is the default on other systems and when
+    # Chrome is absent. Keep the dedicated profile path stable across upgrades.
+    return None
+
+
+def browser_failure(error):
+    """Map known Playwright errors to instructions, never returning raw URLs/logs."""
+    message = str(error).lower()
+    if any(
+        value in message
+        for value in ("processsingleton", "singletonlock", "profile is in use", "user data directory is already in use")
+    ):
+        return ExtractionError(
+            "browser_profile_in_use",
+            "The dedicated Douyin browser profile is already in use. Close its other window or extractor instance, then retry.",
+            422,
+        )
+    if "executable doesn't exist" in message or ("distribution" in message and "not found" in message):
+        return ExtractionError(
+            "browser_not_installed",
+            "The selected Douyin browser is not installed. Run the project's browser setup, or install Chrome and set DOUYIN_BROWSER_CHANNEL=chrome, then restart.",
+            422,
+        )
+    if "has been closed" in message or "browser closed" in message:
+        return ExtractionError(
+            "browser_closed",
+            "The Douyin browser was closed before extraction finished. Retry and keep its window open until caption checking or media download finishes.",
+            422,
+        )
+    if "timeout" in message:
+        return ExtractionError(
+            "browser_timeout",
+            "The Douyin browser timed out. Check access to Douyin and your connection, then retry extraction.",
+            422,
+        )
+    return ExtractionError(
+        "browser_failed",
+        "The Douyin browser could not complete extraction. Check your connection, close any stale dedicated Douyin window, then retry.",
+        422,
+    )
+
 
 # Return bounded text rather than JSON.parse, preserving 64-bit video IDs. Fetch
 # stays in the normal page context, including its existing authenticated session.

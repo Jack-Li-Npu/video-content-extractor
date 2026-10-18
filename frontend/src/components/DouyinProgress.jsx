@@ -1,5 +1,5 @@
 import { Check, Circle, ExternalLink } from 'lucide-react';
-import { isRunning, progressSteps } from '../lib/douyin-flow';
+import { failureGuidance, isRunning, progressSteps } from '../lib/douyin-flow';
 
 export default function DouyinProgress({ job, onShowBrowser, onCancel, busy }) {
   const waiting = job.state === 'waiting_verification';
@@ -18,7 +18,7 @@ export default function DouyinProgress({ job, onShowBrowser, onCancel, busy }) {
       </ol>
       {waiting && <div className="progress-guidance"><p>Complete any requested login or identity check yourself on Douyin’s official page, then click <strong>I’ve verified, continue</strong>. Caption extraction does not require playing the video.</p><button className="button button-outline" disabled={busy} onClick={onShowBrowser}><ExternalLink size={15} />Show Douyin window</button></div>}
       {choosing && <p className="progress-guidance">Select a caption track in the source panel, then click <strong>Use selected captions</strong>. This retrieves the selected timed text.</p>}
-      {failed && <p className="progress-guidance">{job.can_retry_speech ? 'Click Retry speech recognition. The acquired video is kept, so no new login or download is needed.' : missingCaptions ? 'No audio, video, or speech model was downloaded. Try another video, or enable the video-download fallback for local speech recognition and retry.' : 'Follow the instruction above, then click Retry extraction.'}</p>}
+      {failed && <p className="progress-guidance">{failureGuidance(job)}</p>}
       {job.diagnostic && <details className="progress-diagnostic"><summary>Error details</summary><p>Code: {job.diagnostic.code}{job.diagnostic.worker_exit_code != null && ` · Worker exit: ${job.diagnostic.worker_exit_code}`}</p></details>}
       {isRunning(job) && <button className="text-button cancel-extraction" disabled={busy} onClick={onCancel}>Cancel extraction</button>}
       <p className="progress-footnote">You can switch to YouTube while this job runs. After a page reload, open the Douyin tab to return to it.</p>
